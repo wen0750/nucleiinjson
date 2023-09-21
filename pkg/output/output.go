@@ -20,7 +20,7 @@ import (
 	fileutil "github.com/projectdiscovery/utils/file"
 	osutils "github.com/projectdiscovery/utils/os"
 	"github.com/wen0750/nucleiinjson/internal/colorizer"
-	"github.com/wen0750/nucleiinjson/pkg/database"
+	"github.com/wen0750/nucleiinjson/pkg/database/history"
 	"github.com/wen0750/nucleiinjson/pkg/model"
 	"github.com/wen0750/nucleiinjson/pkg/model/types/severity"
 	"github.com/wen0750/nucleiinjson/pkg/operators"
@@ -237,7 +237,7 @@ func (w *StandardWriter) Write(event *ResultEvent) error {
 	_, _ = os.Stdout.Write(data)
 	_, _ = os.Stdout.Write([]byte("\n"))
 
-	database.InsertHistoryRecord(event, w.historyID)
+	history.InsertRecord(event, w.historyID)
 
 	if w.outputFile != nil {
 		if !w.json {
