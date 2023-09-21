@@ -123,6 +123,10 @@ on extensive configurability, massive extensibility and ease of use.`)
 	This can be very confusing and should be addressed
 	*/
 
+	flagSet.CreateGroup("custominfo", "CustomInfo",
+		flagSet.StringVar(&options.Hid, "hid", "", "history id of this scanning"),
+	)
+
 	flagSet.CreateGroup("input", "Target",
 		flagSet.StringSliceVarP(&options.Targets, "target", "u", nil, "target URLs/hosts to scan", goflags.StringSliceOptions),
 		flagSet.StringVarP(&options.TargetsFilePath, "list", "l", "", "path to file containing a list of target URLs/hosts to scan (one per line)"),

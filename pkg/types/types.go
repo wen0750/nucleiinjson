@@ -18,6 +18,10 @@ var (
 
 // Options contains the configuration options for nuclei scanner.
 type Options struct {
+	//wen0750 custom
+	// Hid is the history id of a project scanning
+	Hid string
+
 	// Tags contains a list of tags to execute templates for. Multiple paths
 	// can be specified with -l flag and -tags can be used in combination with
 	// the -l flag.

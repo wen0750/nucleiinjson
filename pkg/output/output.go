@@ -20,6 +20,7 @@ import (
 	fileutil "github.com/projectdiscovery/utils/file"
 	osutils "github.com/projectdiscovery/utils/os"
 	"github.com/wen0750/nucleiinjson/internal/colorizer"
+	"github.com/wen0750/nucleiinjson/pkg/database"
 	"github.com/wen0750/nucleiinjson/pkg/model"
 	"github.com/wen0750/nucleiinjson/pkg/model/types/severity"
 	"github.com/wen0750/nucleiinjson/pkg/operators"
@@ -58,6 +59,7 @@ type StandardWriter struct {
 	severityColors   func(severity.Severity) string
 	storeResponse    bool
 	storeResponseDir string
+	historyID        string
 }
 
 var decolorizerRegex = regexp.MustCompile(`\x1B\[[0-9;]*[a-zA-Z]`)
@@ -202,6 +204,7 @@ func NewStandardWriter(options *types.Options) (*StandardWriter, error) {
 		severityColors:   colorizer.New(auroraColorizer),
 		storeResponse:    options.StoreResponse,
 		storeResponseDir: options.StoreResponseDir,
+		historyID:        options.Hid,
 	}
 	return writer, nil
 }
@@ -233,6 +236,8 @@ func (w *StandardWriter) Write(event *ResultEvent) error {
 
 	_, _ = os.Stdout.Write(data)
 	_, _ = os.Stdout.Write([]byte("\n"))
+
+	database.InsertHistoryRecord(event, w.historyID)
 
 	if w.outputFile != nil {
 		if !w.json {
