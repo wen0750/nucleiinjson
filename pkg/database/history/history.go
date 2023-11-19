@@ -45,3 +45,16 @@ func InsertRecord(data interface{}, fid string) {
 
 	collection.FindOneAndUpdate(ctx, filter, update)
 }
+
+func UpdateInformation(fid string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	objID, _ := primitive.ObjectIDFromHex(fid)
+	filter := bson.M{"_id": objID}
+	update := bson.M{
+		"$set": bson.M{"endTime": time.Now().Unix(), "status": "idle"},
+	}
+
+	collection.FindOneAndUpdate(ctx, filter, update)
+}

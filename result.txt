@@ -27,3 +27,23 @@ second run/load:
 [INF] New templates added in latest release: 198
 [INF] Templates loaded for current scan: 6662
 [INF] No results found. Better luck next time!
+
+
+
+
+
+
+
+
+
+
+
+
+[INF] nuclei-templates are not installed, installing...
+[INF] Successfully installed nuclei-templates at C:\Users\wilson\nuclei-templates
+[WRN] Found 10 template[s] loaded with deprecated paths, update before v3 for continued support.   
+[INF] Current nuclei version: v2.9.10 (outdated)
+[INF] Current nuclei-templates version: v9.6.2 (latest)
+[INF] New templates added in latest release: 61
+[INF] Templates loaded for current scan: 6719
+[INF] No results found. Better luck next time!

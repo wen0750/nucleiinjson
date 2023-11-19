@@ -120,6 +120,7 @@ require (
 	github.com/mackerelio/go-osstat v0.2.4 // indirect
 	github.com/minio/selfupdate v0.6.0 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
+	github.com/montanaflynn/stats v0.7.0 // indirect
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.15.1 // indirect
 	github.com/pjbgf/sha1cd v0.3.0 // indirect
@@ -140,11 +141,17 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/rtred v0.1.2 // indirect
 	github.com/tidwall/tinyqueue v0.1.1 // indirect
+	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
+	github.com/xdg-go/scram v1.1.2 // indirect
+	github.com/xdg-go/stringprep v1.0.4 // indirect
+	github.com/youmark/pkcs8 v0.0.0-20181117223130-1be2e3e5546d // indirect
 	github.com/ysmood/fetchup v0.2.3 // indirect
 	github.com/ysmood/got v0.34.1 // indirect
 	github.com/yuin/goldmark v1.5.4 // indirect
 	github.com/yuin/goldmark-emoji v1.0.1 // indirect
+	go.mongodb.org/mongo-driver v1.12.1 // indirect
 	go.uber.org/atomic v1.10.0 // indirect
+	golang.org/x/sync v0.3.0 // indirect
 	gopkg.in/djherbis/times.v1 v1.3.0 // indirect
 )
 

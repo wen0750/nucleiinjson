@@ -31,6 +31,7 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/catalog/loader"
 	"github.com/wen0750/nucleiinjson/pkg/core"
 	"github.com/wen0750/nucleiinjson/pkg/core/inputs/hybrid"
+	"github.com/wen0750/nucleiinjson/pkg/database/history"
 	"github.com/wen0750/nucleiinjson/pkg/external/customtemplates"
 	"github.com/wen0750/nucleiinjson/pkg/input"
 	"github.com/wen0750/nucleiinjson/pkg/output"
@@ -627,6 +628,8 @@ func (r *Runner) RunEnumeration() error {
 	if r.options.OfflineHTTP && len(r.options.Targets) == 0 && r.options.TargetsFilePath == "" {
 		return errors.Wrap(err, "missing required input (http response) to run passive templates")
 	}
+	// [custom] update history's info
+	history.UpdateInformation(r.options.Hid)
 
 	return err
 }
