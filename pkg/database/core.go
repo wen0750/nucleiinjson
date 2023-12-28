@@ -10,7 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-var mongoURI string = "mongodb+srv://sam1916:ue6aE6jfXGtBvwS@cluster1.mrkha9f.mongodb.net/?retryWrites=true&w=majority"
+var mongoURI string = "mongodb+srv://fyp_admin:nPg6Q6eOS4kUxgtMH2mrbmD4Gkh0Z1oa@db.an-api.net/FYP"
 var dbName string = "FYP"
 
 func CreateCollection(client *mongo.Client, collectionName string) (*mongo.Collection, error) {
