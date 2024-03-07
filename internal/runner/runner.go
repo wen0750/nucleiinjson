@@ -3,19 +3,24 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	uncoverlib "github.com/projectdiscovery/uncover"
+	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
+	"github.com/projectdiscovery/utils/env"
+	fileutil "github.com/projectdiscovery/utils/file"
+	permissionutil "github.com/projectdiscovery/utils/permission"
 	updateutils "github.com/projectdiscovery/utils/update"
-	"github.com/wen0750/nucleiinjson/internal/installer"
-	"github.com/wen0750/nucleiinjson/internal/runner/nucleicloud"
+	"github.com/wen0750/nucleiinjson/internal/pdcp"
+	"github.com/wen0750/nucleiinjson/pkg/installer"
 
 	"github.com/logrusorgru/aurora"
 	"github.com/pkg/errors"
@@ -49,15 +54,18 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/protocols/headless/engine"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/http/httpclientpool"
 	"github.com/wen0750/nucleiinjson/pkg/reporting"
-	"github.com/wen0750/nucleiinjson/pkg/reporting/exporters/jsonexporter"
-	"github.com/wen0750/nucleiinjson/pkg/reporting/exporters/jsonl"
-	"github.com/wen0750/nucleiinjson/pkg/reporting/exporters/markdown"
-	"github.com/wen0750/nucleiinjson/pkg/reporting/exporters/sarif"
 	"github.com/wen0750/nucleiinjson/pkg/templates"
 	"github.com/wen0750/nucleiinjson/pkg/types"
 	"github.com/wen0750/nucleiinjson/pkg/utils"
 	"github.com/wen0750/nucleiinjson/pkg/utils/stats"
 	"github.com/wen0750/nucleiinjson/pkg/utils/yaml"
+)
+
+var (
+	// HideAutoSaveMsg is a global variable to hide the auto-save message
+	HideAutoSaveMsg = false
+	// EnableCloudUpload is global variable to enable cloud upload
+	EnableCloudUpload = false
 )
 
 // Runner is a client for running the enumeration process.
@@ -76,8 +84,8 @@ type Runner struct {
 	hostErrors        hosterrorscache.CacheInterface
 	resumeCfg         *types.ResumeCfg
 	pprofServer       *http.Server
-	cloudClient       *nucleicloud.Client
-	cloudTargets      []string
+	// pdcp auto-save options
+	pdcpUploadErrMsg string
 }
 
 const pprofServerAddress = "127.0.0.1:8086"
@@ -91,10 +99,6 @@ func New(options *types.Options) (*Runner, error) {
 	if options.HealthCheck {
 		gologger.Print().Msgf("%s\n", DoHealthCheck(options))
 		os.Exit(0)
-	}
-
-	if options.Cloud {
-		runner.cloudClient = nucleicloud.New(options.CloudURL, options.CloudAPIKey)
 	}
 
 	//  Version check by default
@@ -210,31 +214,13 @@ func New(options *types.Options) (*Runner, error) {
 		}()
 	}
 
-	if (len(options.Templates) == 0 || !options.NewTemplates || (options.TargetsFilePath == "" && !options.Stdin && len(options.Targets) == 0)) && (options.UpdateTemplates && !options.Cloud) {
+	if (len(options.Templates) == 0 || !options.NewTemplates || (options.TargetsFilePath == "" && !options.Stdin && len(options.Targets) == 0)) && options.UpdateTemplates {
 		os.Exit(0)
 	}
 
 	// Initialize the input source
 	hmapInput, err := hybrid.New(&hybrid.Options{
 		Options: options,
-		NotFoundCallback: func(target string) bool {
-			if !options.Cloud {
-				return false
-			}
-			parsed, parseErr := strconv.ParseInt(target, 10, 64)
-			if parseErr != nil {
-				if err := runner.cloudClient.ExistsDataSourceItem(nucleicloud.ExistsDataSourceItemRequest{Contents: target, Type: "targets"}); err == nil {
-					runner.cloudTargets = append(runner.cloudTargets, target)
-					return true
-				}
-				return false
-			}
-			if exists, err := runner.cloudClient.ExistsTarget(parsed); err == nil {
-				runner.cloudTargets = append(runner.cloudTargets, exists.Reference)
-				return true
-			}
-			return false
-		},
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "could not create input provider")
@@ -246,7 +232,8 @@ func New(options *types.Options) (*Runner, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "could not create output file")
 	}
-	runner.output = outputWriter
+	// setup a proxy writer to automatically upload results to PDCP
+	runner.output = runner.setupPDCPUpload(outputWriter)
 
 	if options.JSONL && options.EnableProgressBar {
 		options.StatsJSON = true
@@ -257,11 +244,7 @@ func New(options *types.Options) (*Runner, error) {
 	// Creates the progress tracking object
 	var progressErr error
 	statsInterval := options.StatsInterval
-	if options.Cloud && !options.EnableProgressBar {
-		statsInterval = -1
-		options.EnableProgressBar = true
-	}
-	runner.progress, progressErr = progress.NewStatsTicker(statsInterval, options.EnableProgressBar, options.StatsJSON, options.Metrics, options.Cloud, options.MetricsPort)
+	runner.progress, progressErr = progress.NewStatsTicker(statsInterval, options.EnableProgressBar, options.StatsJSON, false, options.MetricsPort)
 	if progressErr != nil {
 		return nil, progressErr
 	}
@@ -310,6 +293,15 @@ func New(options *types.Options) (*Runner, error) {
 	if httpclient != nil {
 		opts.HTTPClient = httpclient
 	}
+	if opts.HTTPClient == nil {
+		httpOpts := retryablehttp.DefaultOptionsSingle
+		httpOpts.Timeout = 20 * time.Second // for stability reasons
+		if options.Timeout > 20 {
+			httpOpts.Timeout = time.Duration(options.Timeout) * time.Second
+		}
+		// in testing it was found most of times when interactsh failed, it was due to failure in registering /polling requests
+		opts.HTTPClient = retryablehttp.NewClient(retryablehttp.DefaultOptionsSingle)
+	}
 	interactshClient, err := interactsh.New(opts)
 	if err != nil {
 		gologger.Error().Msgf("Could not create interactsh client: %s", err)
@@ -327,81 +319,21 @@ func New(options *types.Options) (*Runner, error) {
 	return runner, nil
 }
 
-func createReportingOptions(options *types.Options) (*reporting.Options, error) {
-	var reportingOptions *reporting.Options
-	if options.ReportingConfig != "" {
-		file, err := os.Open(options.ReportingConfig)
-		if err != nil {
-			return nil, errors.Wrap(err, "could not open reporting config file")
-		}
-		defer file.Close()
-
-		reportingOptions = &reporting.Options{}
-		if err := yaml.DecodeAndValidate(file, reportingOptions); err != nil {
-			return nil, errors.Wrap(err, "could not parse reporting config file")
-		}
-		Walk(reportingOptions, expandEndVars)
+// runStandardEnumeration runs standard enumeration
+func (r *Runner) runStandardEnumeration(executerOpts protocols.ExecutorOptions, store *loader.Store, engine *core.Engine) (*atomic.Bool, error) {
+	if r.options.AutomaticScan {
+		return r.executeSmartWorkflowInput(executerOpts, store, engine)
 	}
-	if options.MarkdownExportDirectory != "" {
-		if reportingOptions != nil {
-			reportingOptions.MarkdownExporter = &markdown.Options{
-				Directory:         options.MarkdownExportDirectory,
-				IncludeRawPayload: !options.OmitRawRequests,
-				SortMode:          options.MarkdownExportSortMode,
-			}
-		} else {
-			reportingOptions = &reporting.Options{}
-			reportingOptions.MarkdownExporter = &markdown.Options{
-				Directory:         options.MarkdownExportDirectory,
-				IncludeRawPayload: !options.OmitRawRequests,
-				SortMode:          options.MarkdownExportSortMode,
-			}
-		}
-	}
-	if options.SarifExport != "" {
-		if reportingOptions != nil {
-			reportingOptions.SarifExporter = &sarif.Options{File: options.SarifExport}
-		} else {
-			reportingOptions = &reporting.Options{}
-			reportingOptions.SarifExporter = &sarif.Options{File: options.SarifExport}
-		}
-	}
-	if options.JSONExport != "" {
-		if reportingOptions != nil {
-			reportingOptions.JSONExporter = &jsonexporter.Options{
-				File:              options.JSONExport,
-				IncludeRawPayload: !options.OmitRawRequests,
-			}
-		} else {
-			reportingOptions = &reporting.Options{}
-			reportingOptions.JSONExporter = &jsonexporter.Options{
-				File:              options.JSONExport,
-				IncludeRawPayload: !options.OmitRawRequests,
-			}
-		}
-	}
-	if options.JSONLExport != "" {
-		if reportingOptions != nil {
-			reportingOptions.JSONLExporter = &jsonl.Options{
-				File:              options.JSONLExport,
-				IncludeRawPayload: !options.OmitRawRequests,
-			}
-		} else {
-			reportingOptions = &reporting.Options{}
-			reportingOptions.JSONLExporter = &jsonl.Options{
-				File:              options.JSONLExport,
-				IncludeRawPayload: !options.OmitRawRequests,
-			}
-		}
-	}
-
-	return reportingOptions, nil
+	return r.executeTemplatesInput(store, engine)
 }
 
 // Close releases all the resources and cleans up
 func (r *Runner) Close() {
 	if r.output != nil {
 		r.output.Close()
+	}
+	if r.issuesClient != nil {
+		r.issuesClient.Close()
 	}
 	if r.projectFile != nil {
 		r.projectFile.Close()
@@ -414,6 +346,42 @@ func (r *Runner) Close() {
 	if r.rateLimiter != nil {
 		r.rateLimiter.Stop()
 	}
+	r.progress.Stop()
+	if r.browser != nil {
+		r.browser.Close()
+	}
+}
+
+// setupPDCPUpload sets up the PDCP upload writer
+// by creating a new writer and returning it
+func (r *Runner) setupPDCPUpload(writer output.Writer) output.Writer {
+	// if scanid is given implicitly consider that scan upload is enabled
+	if r.options.ScanID != "" {
+		r.options.EnableCloudUpload = true
+	}
+	if !(r.options.EnableCloudUpload || EnableCloudUpload) {
+		r.pdcpUploadErrMsg = fmt.Sprintf("[%v] Scan results upload to cloud is disabled.", aurora.BrightYellow("WRN"))
+		return writer
+	}
+	color := aurora.NewAurora(!r.options.NoColor)
+	h := &pdcpauth.PDCPCredHandler{}
+	creds, err := h.GetCreds()
+	if err != nil {
+		if err != pdcpauth.ErrNoCreds && !HideAutoSaveMsg {
+			gologger.Verbose().Msgf("Could not get credentials for cloud upload: %s\n", err)
+		}
+		r.pdcpUploadErrMsg = fmt.Sprintf("[%v] To view results on Cloud Dashboard, Configure API key from %v", color.BrightYellow("WRN"), pdcpauth.DashBoardURL)
+		return writer
+	}
+	uploadWriter, err := pdcp.NewUploadWriter(context.Background(), creds)
+	if err != nil {
+		r.pdcpUploadErrMsg = fmt.Sprintf("[%v] PDCP (%v) Auto-Save Failed: %s\n", color.BrightYellow("WRN"), pdcpauth.DashBoardURL, err)
+		return writer
+	}
+	if r.options.ScanID != "" {
+		uploadWriter.SetScanID(r.options.ScanID)
+	}
+	return output.NewMultiWriter(writer, uploadWriter)
 }
 
 // RunEnumeration sets up the input layer for giving input nuclei.
@@ -476,25 +444,6 @@ func (r *Runner) RunEnumeration() error {
 		return errors.Wrap(err, "could not load templates from config")
 	}
 
-	var cloudTemplates []string
-	if r.options.Cloud {
-		// hook template loading
-		store.NotFoundCallback = func(template string) bool {
-			parsed, parseErr := strconv.ParseInt(template, 10, 64)
-			if parseErr != nil {
-				if err := r.cloudClient.ExistsDataSourceItem(nucleicloud.ExistsDataSourceItemRequest{Type: "templates", Contents: template}); err == nil {
-					cloudTemplates = append(cloudTemplates, template)
-					return true
-				}
-				return false
-			}
-			if exists, err := r.cloudClient.ExistsTemplate(parsed); err == nil {
-				cloudTemplates = append(cloudTemplates, exists.Reference)
-				return true
-			}
-			return false
-		}
-	}
 	if r.options.Validate {
 		if err := store.ValidateTemplates(); err != nil {
 			return err
@@ -522,7 +471,7 @@ func (r *Runner) RunEnumeration() error {
 		}
 		ret := uncover.GetUncoverTargetsFromMetadata(context.TODO(), store.Templates(), r.options.UncoverField, uncoverOpts)
 		for host := range ret {
-			r.hmapInputProvider.Set(host)
+			r.hmapInputProvider.SetWithExclusions(host)
 		}
 	}
 	// list all templates
@@ -547,55 +496,8 @@ func (r *Runner) RunEnumeration() error {
 
 	enumeration := false
 	var results *atomic.Bool
-	if r.options.Cloud {
-		if r.options.ScanList {
-			err = r.getScanList(r.options.OutputLimit)
-		} else if r.options.DeleteScan != "" {
-			err = r.deleteScan(r.options.DeleteScan)
-		} else if r.options.ScanOutput != "" {
-			err = r.getResults(r.options.ScanOutput, r.options.OutputLimit)
-		} else if r.options.ListDatasources {
-			err = r.listDatasources()
-		} else if r.options.ListTargets {
-			err = r.listTargets()
-		} else if r.options.ListTemplates {
-			err = r.listTemplates()
-		} else if r.options.ListReportingSources {
-			err = r.listReportingSources()
-		} else if r.options.AddDatasource != "" {
-			err = r.addCloudDataSource(r.options.AddDatasource)
-		} else if r.options.RemoveDatasource != "" {
-			err = r.removeDatasource(r.options.RemoveDatasource)
-		} else if r.options.DisableReportingSource != "" {
-			err = r.toggleReportingSource(r.options.DisableReportingSource, false)
-		} else if r.options.EnableReportingSource != "" {
-			err = r.toggleReportingSource(r.options.EnableReportingSource, true)
-		} else if r.options.AddTarget != "" {
-			err = r.addTarget(r.options.AddTarget)
-		} else if r.options.AddTemplate != "" {
-			err = r.addTemplate(r.options.AddTemplate)
-		} else if r.options.GetTarget != "" {
-			err = r.getTarget(r.options.GetTarget)
-		} else if r.options.GetTemplate != "" {
-			err = r.getTemplate(r.options.GetTemplate)
-		} else if r.options.RemoveTarget != "" {
-			err = r.removeTarget(r.options.RemoveTarget)
-		} else if r.options.RemoveTemplate != "" {
-			err = r.removeTemplate(r.options.RemoveTemplate)
-		} else if r.options.ReportingConfig != "" {
-			err = r.addCloudReportingSource()
-		} else {
-			if len(store.Templates())+len(store.Workflows())+len(cloudTemplates) == 0 {
-				return errors.New("no templates provided for scan")
-			}
-			gologger.Info().Msgf("Running scan on cloud with URL %s", r.options.CloudURL)
-			results, err = r.runCloudEnumeration(store, cloudTemplates, r.cloudTargets, r.options.NoStore, r.options.OutputLimit)
-			enumeration = true
-		}
-	} else {
-		results, err = r.runStandardEnumeration(executorOpts, store, executorEngine)
-		enumeration = true
-	}
+	results, err = r.runStandardEnumeration(executorOpts, store, executorEngine)
+	enumeration = true
 
 	if !enumeration {
 		return err
@@ -607,13 +509,8 @@ func (r *Runner) RunEnumeration() error {
 			results.CompareAndSwap(false, true)
 		}
 	}
-	r.progress.Stop()
-
 	if executorOpts.InputHelper != nil {
 		_ = executorOpts.InputHelper.Close()
-	}
-	if r.issuesClient != nil {
-		r.issuesClient.Close()
 	}
 
 	// todo: error propagation without canonical straight error check is required by cloud?
@@ -621,13 +518,11 @@ func (r *Runner) RunEnumeration() error {
 	if v := ptrutil.Safe(results); !v.Load() {
 		gologger.Info().Msgf("No results found. Better luck next time!")
 	}
-	if r.browser != nil {
-		r.browser.Close()
-	}
 	// check if a passive scan was requested but no target was provided
 	if r.options.OfflineHTTP && len(r.options.Targets) == 0 && r.options.TargetsFilePath == "" {
 		return errors.Wrap(err, "missing required input (http response) to run passive templates")
 	}
+
 	// [custom] update history's info
 	history.UpdateInformation(r.options.Hid)
 
@@ -658,23 +553,15 @@ func (r *Runner) executeSmartWorkflowInput(executorOpts protocols.ExecutorOption
 	if err != nil {
 		return nil, errors.Wrap(err, "could not create automatic scan service")
 	}
-	service.Execute()
+	if err := service.Execute(); err != nil {
+		return nil, errors.Wrap(err, "could not execute automatic scan")
+	}
 	result := &atomic.Bool{}
 	result.Store(service.Close())
 	return result, nil
 }
 
 func (r *Runner) executeTemplatesInput(store *loader.Store, engine *core.Engine) (*atomic.Bool, error) {
-	var unclusteredRequests int64
-	for _, template := range store.Templates() {
-		// workflows will dynamically adjust the totals while running, as
-		// it can't be known in advance which requests will be called
-		if len(template.Workflows) > 0 {
-			continue
-		}
-		unclusteredRequests += int64(template.TotalRequests) * r.hmapInputProvider.Count()
-	}
-
 	if r.options.VerboseVerbose {
 		for _, template := range store.Templates() {
 			r.logAvailableTemplate(template.Path)
@@ -684,34 +571,15 @@ func (r *Runner) executeTemplatesInput(store *loader.Store, engine *core.Engine)
 		}
 	}
 
-	// Cluster the templates first because we want info on how many
-	// templates did we cluster for showing to user in CLI
-	originalTemplatesCount := len(store.Templates())
-	finalTemplates, clusterCount := templates.ClusterTemplates(store.Templates(), engine.ExecuterOptions())
+	finalTemplates := []*templates.Template{}
+	finalTemplates = append(finalTemplates, store.Templates()...)
 	finalTemplates = append(finalTemplates, store.Workflows()...)
 
-	var totalRequests int64
-	for _, t := range finalTemplates {
-		if len(t.Workflows) > 0 {
-			continue
-		}
-		totalRequests += int64(t.Executer.Requests()) * r.hmapInputProvider.Count()
-	}
-	if totalRequests < unclusteredRequests {
-		gologger.Info().Msgf("Templates clustered: %d (Reduced %d Requests)", clusterCount, unclusteredRequests-totalRequests)
-	}
-	workflowCount := len(store.Workflows())
-	templateCount := originalTemplatesCount + workflowCount
-
-	// 0 matches means no templates were found in the directory
-	if templateCount == 0 {
-		return &atomic.Bool{}, errors.New("no valid templates were found")
+	if len(finalTemplates) == 0 {
+		return nil, errors.New("no templates provided for scan")
 	}
 
-	// tracks global progress and captures stdout/stderr until p.Wait finishes
-	r.progress.Init(r.hmapInputProvider.Count(), templateCount, totalRequests)
-
-	results := engine.ExecuteScanWithOpts(finalTemplates, r.hmapInputProvider, true)
+	results := engine.ExecuteScanWithOpts(finalTemplates, r.hmapInputProvider, r.options.DisableClustering)
 	return results, nil
 }
 
@@ -721,11 +589,25 @@ func (r *Runner) displayExecutionInfo(store *loader.Store) {
 	stats.Display(parsers.SyntaxWarningStats)
 	stats.Display(parsers.SyntaxErrorStats)
 	stats.Display(parsers.RuntimeWarningsStats)
+	if r.options.Verbose {
+		// only print these stats in verbose mode
+		stats.DisplayAsWarning(parsers.HeadlessFlagWarningStats)
+		stats.DisplayAsWarning(parsers.CodeFlagWarningStats)
+		stats.DisplayAsWarning(parsers.TemplatesExecutedStats)
+	}
+	stats.DisplayAsWarning(parsers.UnsignedWarning)
 
 	cfg := config.DefaultConfig
 
 	gologger.Info().Msgf("Current nuclei version: %v %v", config.Version, updateutils.GetVersionDescription(config.Version, cfg.LatestNucleiVersion))
 	gologger.Info().Msgf("Current nuclei-templates version: %v %v", cfg.TemplateVersion, updateutils.GetVersionDescription(cfg.TemplateVersion, cfg.LatestNucleiTemplatesVersion))
+	if !HideAutoSaveMsg {
+		if r.pdcpUploadErrMsg != "" {
+			gologger.Print().Msgf("%s", r.pdcpUploadErrMsg)
+		} else {
+			gologger.Info().Msgf("To view results on cloud dashboard, visit %v/scans upon scan completion.", pdcpauth.DashBoardURL)
+		}
+	}
 
 	if len(store.Templates()) > 0 {
 		gologger.Info().Msgf("New templates added in latest release: %d", len(config.DefaultConfig.GetNewAdditions()))
@@ -734,6 +616,15 @@ func (r *Runner) displayExecutionInfo(store *loader.Store) {
 	if len(store.Workflows()) > 0 {
 		gologger.Info().Msgf("Workflows loaded for current scan: %d", len(store.Workflows()))
 	}
+	for k, v := range templates.SignatureStats {
+		if v.Load() > 0 {
+			if k != templates.Unsigned {
+				gologger.Info().Msgf("Executing %d signed templates from %s", v.Load(), k)
+			} else if !r.options.Silent && !config.DefaultConfig.HideTemplateSigWarning {
+				gologger.Print().Msgf("[%v] Executing %d unsigned templates. Use with caution.", aurora.BrightYellow("WRN"), v.Load())
+			}
+		}
+	}
 	if r.hmapInputProvider.Count() > 0 {
 		gologger.Info().Msgf("Targets loaded for current scan: %d", r.hmapInputProvider.Count())
 	}
@@ -741,11 +632,17 @@ func (r *Runner) displayExecutionInfo(store *loader.Store) {
 
 // SaveResumeConfig to file
 func (r *Runner) SaveResumeConfig(path string) error {
+	dir := filepath.Dir(path)
+	if !fileutil.FolderExists(dir) {
+		if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+			return err
+		}
+	}
 	resumeCfgClone := r.resumeCfg.Clone()
 	resumeCfgClone.ResumeFrom = resumeCfgClone.Current
 	data, _ := json.MarshalIndent(resumeCfgClone, "", "\t")
 
-	return os.WriteFile(path, data, os.ModePerm)
+	return os.WriteFile(path, data, permissionutil.ConfigFilePermission)
 }
 
 type WalkFunc func(reflect.Value, reflect.StructField)
@@ -795,4 +692,9 @@ func expandEndVars(f reflect.Value, fieldType reflect.StructField) {
 			}
 		}
 	}
+}
+
+func init() {
+	HideAutoSaveMsg = env.GetEnvOrDefault("DISABLE_CLOUD_UPLOAD_WRN", false)
+	EnableCloudUpload = env.GetEnvOrDefault("ENABLE_CLOUD_UPLOAD", false)
 }

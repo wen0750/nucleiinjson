@@ -2,11 +2,17 @@ package types
 
 import (
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/projectdiscovery/goflags"
+	errorutil "github.com/projectdiscovery/utils/errors"
 	fileutil "github.com/projectdiscovery/utils/file"
+	folderutil "github.com/projectdiscovery/utils/folder"
+	"github.com/wen0750/nucleiinjson/pkg/catalog"
+	"github.com/wen0750/nucleiinjson/pkg/catalog/config"
 	"github.com/wen0750/nucleiinjson/pkg/model/types/severity"
 	"github.com/wen0750/nucleiinjson/pkg/templates/types"
 )
@@ -18,7 +24,6 @@ var (
 
 // Options contains the configuration options for nuclei scanner.
 type Options struct {
-	//wen0750 custom
 	// Hid is the history id of a project scanning
 	Hid string
 
@@ -74,6 +79,8 @@ type Options struct {
 	InteractshToken string
 	// Target URLs/Domains to scan using a template
 	Targets goflags.StringSlice
+	// ExcludeTargets URLs/Domains to exclude from scanning
+	ExcludeTargets goflags.StringSlice
 	// TargetsFilePath specifies the targets from a file to scan using templates.
 	TargetsFilePath string
 	// Resume the scan from the state stored in the resume config file
@@ -102,48 +109,6 @@ type Options struct {
 	MarkdownExportSortMode string
 	// SarifExport is the file to export sarif output format to
 	SarifExport string
-	// CloudURL is the URL for the nuclei cloud endpoint
-	CloudURL string
-	// CloudAPIKey is the api-key for the nuclei cloud endpoint
-	CloudAPIKey string
-	// Scanlist feature to get all the scan ids for a user
-	ScanList bool
-	// ListDatasources enables listing of datasources for user
-	ListDatasources bool
-	// ListTargets enables listing of targets for user
-	ListTargets bool
-	// ListTemplates enables listing of templates for user
-	ListTemplates bool
-	// ListReportingSources enables listing of reporting source
-	ListReportingSources bool
-	// DisableReportingSource disables a reporting source
-	DisableReportingSource string
-	// EnableReportingSource enables a reporting source
-	EnableReportingSource string
-	// Limit the number of items at a time
-	OutputLimit int
-	// Nostore
-	NoStore bool
-	// Delete scan
-	DeleteScan string
-	// AddDatasource adds a datasource to cloud storage
-	AddDatasource string
-	// RemoveDatasource deletes a datasource from cloud storage
-	RemoveDatasource string
-	// AddTemplate adds a list of templates to custom datasource
-	AddTemplate string
-	// AddTarget adds a list of targets to custom datasource
-	AddTarget string
-	// GetTemplate gets a template by id
-	GetTemplate string
-	// GetTarget gets a target by id
-	GetTarget string
-	// RemoveTemplate removes a list of templates
-	RemoveTemplate string
-	// RemoveTarget removes a list of targets
-	RemoveTarget string
-	// Get issues for a scan
-	ScanOutput string
 	// ResolversFile is a file containing resolvers for nuclei.
 	ResolversFile string
 	// StatsInterval is the number of seconds to display stats after
@@ -204,8 +169,6 @@ type Options struct {
 	ShowBrowser bool
 	// HeadlessOptionalArguments specifies optional arguments to pass to Chrome
 	HeadlessOptionalArguments goflags.StringSlice
-	// NoTables disables pretty printing of cloud results in tables
-	NoTables bool
 	// DisableClustering disables clustering of templates
 	DisableClustering bool
 	// UseInstalledChrome skips chrome install and use local instance
@@ -214,7 +177,7 @@ type Options struct {
 	SystemResolvers bool
 	// ShowActions displays a list of all headless actions
 	ShowActions bool
-	// Metrics enables display of metrics via an http endpoint
+	// Deprecated: Enabled by default through clistats . Metrics enables display of metrics via an http endpoint
 	Metrics bool
 	// Debug mode allows debugging request/responses for the engine
 	Debug bool
@@ -250,12 +213,12 @@ type Options struct {
 	JSONRequests bool
 	// OmitRawRequests omits requests/responses for matches in JSON output
 	OmitRawRequests bool
+	// OmitTemplate omits encoded template from JSON output
+	OmitTemplate bool
 	// JSONExport is the file to export JSON output format to
 	JSONExport string
 	// JSONLExport is the file to export JSONL output format to
 	JSONLExport string
-	// Cloud enables nuclei cloud scan execution
-	Cloud bool
 	// EnableProgressBar enables progress bar
 	EnableProgressBar bool
 	// TemplateDisplay displays the template contents
@@ -310,6 +273,10 @@ type Options struct {
 	DisableRedirects bool
 	// SNI custom hostname
 	SNI string
+	// DialerTimeout sets the timeout for network requests.
+	DialerTimeout time.Duration
+	// DialerKeepAlive sets the keep alive duration for network requests.
+	DialerKeepAlive time.Duration
 	// Interface to use for network scan
 	Interface string
 	// SourceIP sets custom source IP address for network requests
@@ -328,9 +295,7 @@ type Options struct {
 	DisableStdin bool
 	// IncludeConditions is the list of conditions templates should match
 	IncludeConditions goflags.StringSlice
-	// Custom Config Directory
-	CustomConfigDir string
-	// Enable uncover egine
+	// Enable uncover engine
 	Uncover bool
 	// Uncover search query
 	UncoverQuery goflags.StringSlice
@@ -349,9 +314,9 @@ type Options struct {
 	// PublicTemplateDisableDownload disables downloading templates from the nuclei-templates public repository
 	PublicTemplateDisableDownload bool
 	// GitHub token used to clone/pull from private repos for custom templates
-	GithubToken string
-	// GithubTemplateRepo is the list of custom public/private templates GitHub repos
-	GithubTemplateRepo []string
+	GitHubToken string
+	// GitHubTemplateRepo is the list of custom public/private templates GitHub repos
+	GitHubTemplateRepo []string
 	// GitHubTemplateDisableDownload disables downloading templates from custom GitHub repositories
 	GitHubTemplateDisableDownload bool
 	// GitLabServerURL is the gitlab server to use for custom templates
@@ -392,6 +357,20 @@ type Options struct {
 	FuzzingMode string
 	// TlsImpersonate enables TLS impersonation
 	TlsImpersonate bool
+	// CodeTemplateSignaturePublicKey is the custom public key used to verify the template signature (algorithm is automatically inferred from the length)
+	CodeTemplateSignaturePublicKey string
+	// CodeTemplateSignatureAlgorithm specifies the sign algorithm (rsa, ecdsa)
+	CodeTemplateSignatureAlgorithm string
+	// SignTemplates enables signing of templates
+	SignTemplates bool
+	// EnableCodeTemplates enables code templates
+	EnableCodeTemplates bool
+	// Disables cloud upload
+	EnableCloudUpload bool
+	// ScanID is the scan ID to use for cloud upload
+	ScanID string
+	// JsConcurrency is the number of concurrent js routines to run
+	JsConcurrency int
 }
 
 // ShouldLoadResume resume file
@@ -425,24 +404,9 @@ func DefaultOptions() *Options {
 		Timeout:                 5,
 		Retries:                 1,
 		MaxHostError:            30,
+		ResponseReadSize:        10 * 1024 * 1024,
+		ResponseSaveSize:        1024 * 1024,
 	}
-}
-
-// HasCloudOptions returns true if cloud options have been specified
-func (options *Options) HasCloudOptions() bool {
-	return options.ScanList ||
-		options.DeleteScan != "" ||
-		options.ScanOutput != "" ||
-		options.ListDatasources ||
-		options.ListTargets ||
-		options.ListTemplates ||
-		options.RemoveDatasource != "" ||
-		options.AddTarget != "" ||
-		options.AddTemplate != "" ||
-		options.RemoveTarget != "" ||
-		options.RemoveTemplate != "" ||
-		options.GetTarget != "" ||
-		options.GetTemplate != ""
 }
 
 func (options *Options) ShouldUseHostError() bool {
@@ -461,4 +425,68 @@ func (options *Options) ParseHeadlessOptionalArguments() map[string]string {
 		}
 	}
 	return optionalArguments
+}
+
+// LoadHelperFile loads a helper file needed for the template
+// this respects the sandbox rules and only loads files from
+// allowed directories
+func (options *Options) LoadHelperFile(helperFile, templatePath string, catalog catalog.Catalog) (io.ReadCloser, error) {
+	if !options.AllowLocalFileAccess {
+		// if global file access is disabled try loading with restrictions
+		absPath, err := options.GetValidAbsPath(helperFile, templatePath)
+		if err != nil {
+			return nil, err
+		}
+		helperFile = absPath
+	}
+	f, err := os.Open(helperFile)
+	if err != nil {
+		return nil, errorutil.NewWithErr(err).Msgf("could not open file %v", helperFile)
+	}
+	return f, nil
+}
+
+// GetValidAbsPath returns absolute path of helper file if it is allowed to be loaded
+// this respects the sandbox rules and only loads files from allowed directories
+func (o *Options) GetValidAbsPath(helperFilePath, templatePath string) (string, error) {
+	// Conditions to allow helper file
+	// 1. If helper file is present in nuclei-templates directory
+	// 2. If helper file and template file are in same directory given that its not root directory
+
+	// resolve and clean helper file path
+	// ResolveNClean uses a custom base path instead of CWD
+	resolvedPath, err := fileutil.ResolveNClean(helperFilePath, config.DefaultConfig.GetTemplateDir())
+	if err == nil {
+		// As per rule 1, if helper file is present in nuclei-templates directory, allow it
+		if strings.HasPrefix(resolvedPath, config.DefaultConfig.GetTemplateDir()) {
+			return resolvedPath, nil
+		}
+	}
+
+	// CleanPath resolves using CWD and cleans the path
+	helperFilePath, err = fileutil.CleanPath(helperFilePath)
+	if err != nil {
+		return "", errorutil.NewWithErr(err).Msgf("could not clean helper file path %v", helperFilePath)
+	}
+
+	templatePath, err = fileutil.CleanPath(templatePath)
+	if err != nil {
+		return "", errorutil.NewWithErr(err).Msgf("could not clean template path %v", templatePath)
+	}
+
+	// As per rule 2, if template and helper file exist in same directory or helper file existed in any child dir of template dir
+	// and both of them are present in user home directory, allow it
+	// Review: should we keep this rule ? add extra option to disable this ?
+	if isHomeDir(helperFilePath) && isHomeDir(templatePath) && strings.HasPrefix(filepath.Dir(helperFilePath), filepath.Dir(templatePath)) {
+		return helperFilePath, nil
+	}
+
+	// all other cases are denied
+	return "", errorutil.New("access to helper file %v denied", helperFilePath)
+}
+
+// isRootDir checks if given is root directory
+func isHomeDir(path string) bool {
+	homeDir := folderutil.HomeDirOrDefault("")
+	return strings.HasPrefix(path, homeDir)
 }

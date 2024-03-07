@@ -1,6 +1,7 @@
 package output
 
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -8,9 +9,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
+	"go.uber.org/multierr"
 
 	jsoniter "github.com/json-iterator/go"
 	"github.com/logrusorgru/aurora"
@@ -20,10 +23,12 @@ import (
 	fileutil "github.com/projectdiscovery/utils/file"
 	osutils "github.com/projectdiscovery/utils/os"
 	"github.com/wen0750/nucleiinjson/internal/colorizer"
+	"github.com/wen0750/nucleiinjson/pkg/catalog/config"
 	"github.com/wen0750/nucleiinjson/pkg/database/history"
 	"github.com/wen0750/nucleiinjson/pkg/model"
 	"github.com/wen0750/nucleiinjson/pkg/model/types/severity"
 	"github.com/wen0750/nucleiinjson/pkg/operators"
+	protocolUtils "github.com/wen0750/nucleiinjson/pkg/protocols/utils"
 	"github.com/wen0750/nucleiinjson/pkg/types"
 	"github.com/wen0750/nucleiinjson/pkg/utils"
 )
@@ -37,7 +42,7 @@ type Writer interface {
 	// Write writes the event to file and/or screen.
 	Write(*ResultEvent) error
 	// WriteFailure writes the optional failure event for template to file and/or screen.
-	WriteFailure(event InternalEvent) error
+	WriteFailure(*InternalWrappedEvent) error
 	// Request logs a request in the trace log
 	Request(templateID, url, requestType string, err error)
 	//  WriteStoreDebugData writes the request/response debug data to file
@@ -46,20 +51,23 @@ type Writer interface {
 
 // StandardWriter is a writer writing output to file and screen for results.
 type StandardWriter struct {
-	json             bool
-	jsonReqResp      bool
-	timestamp        bool
-	noMetadata       bool
-	matcherStatus    bool
-	mutex            *sync.Mutex
-	aurora           aurora.Aurora
-	outputFile       io.WriteCloser
-	traceFile        io.WriteCloser
-	errorFile        io.WriteCloser
-	severityColors   func(severity.Severity) string
-	storeResponse    bool
-	storeResponseDir string
-	historyID        string
+	json                  bool
+	jsonReqResp           bool
+	timestamp             bool
+	noMetadata            bool
+	matcherStatus         bool
+	mutex                 *sync.Mutex
+	aurora                aurora.Aurora
+	outputFile            io.WriteCloser
+	traceFile             io.WriteCloser
+	errorFile             io.WriteCloser
+	severityColors        func(severity.Severity) string
+	storeResponse         bool
+	storeResponseDir      string
+	omitTemplate          bool
+	DisableStdout         bool
+	AddNewLinesOutputFile bool // by default this is only done for stdout
+	historyID             string
 }
 
 var decolorizerRegex = regexp.MustCompile(`\x1B\[[0-9;]*[a-zA-Z]`)
@@ -78,6 +86,9 @@ type InternalWrappedEvent struct {
 	Results         []*ResultEvent
 	OperatorsResult *operators.Result
 	UsesInteractsh  bool
+	// Only applicable if interactsh is used
+	// This is used to avoid duplicate successful interactsh events
+	InteractshMatched atomic.Bool
 }
 
 func (iwe *InternalWrappedEvent) HasOperatorResult() bool {
@@ -112,6 +123,8 @@ type ResultEvent struct {
 	TemplateID string `json:"template-id"`
 	// TemplatePath is the path of template
 	TemplatePath string `json:"template-path,omitempty"`
+	// TemplateEncoded is the base64 encoded template
+	TemplateEncoded string `json:"template-encoded,omitempty"`
 	// Info contains information block of the template for the result.
 	Info model.Info `json:"info,inline"`
 	// MatcherName is the name of the matcher matched if any.
@@ -122,6 +135,12 @@ type ResultEvent struct {
 	Type string `json:"type"`
 	// Host is the host input on which match was found.
 	Host string `json:"host,omitempty"`
+	// Port is port of the host input on which match was found (if applicable).
+	Port string `json:"port,omitempty"`
+	// Scheme is the scheme of the host input on which match was found (if applicable).
+	Scheme string `json:"scheme,omitempty"`
+	// URL is the Base URL of the host input on which match was found (if applicable).
+	URL string `json:"url,omitempty"`
 	// Path is the path input on which match was found.
 	Path string `json:"path,omitempty"`
 	// Matched contains the matched input in its transformed form.
@@ -149,6 +168,7 @@ type ResultEvent struct {
 	Lines []int `json:"matched-line,omitempty"`
 
 	FileToIndexPosition map[string]int `json:"-"`
+	Error               string         `json:"error,omitempty"`
 }
 
 // NewStandardWriter creates a new output writer based on user configurations
@@ -204,6 +224,7 @@ func NewStandardWriter(options *types.Options) (*StandardWriter, error) {
 		severityColors:   colorizer.New(auroraColorizer),
 		storeResponse:    options.StoreResponse,
 		storeResponseDir: options.StoreResponseDir,
+		omitTemplate:     options.OmitTemplate,
 		historyID:        options.Hid,
 	}
 	return writer, nil
@@ -213,8 +234,9 @@ func NewStandardWriter(options *types.Options) (*StandardWriter, error) {
 func (w *StandardWriter) Write(event *ResultEvent) error {
 	// Enrich the result event with extra metadata on the template-path and url.
 	if event.TemplatePath != "" {
-		event.Template, event.TemplateURL = utils.TemplatePathURL(types.ToString(event.TemplatePath))
+		event.Template, event.TemplateURL = utils.TemplatePathURL(types.ToString(event.TemplatePath), types.ToString(event.TemplateID))
 	}
+
 	event.Timestamp = time.Now()
 
 	var data []byte
@@ -234,8 +256,10 @@ func (w *StandardWriter) Write(event *ResultEvent) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	_, _ = os.Stdout.Write(data)
-	_, _ = os.Stdout.Write([]byte("\n"))
+	if !w.DisableStdout {
+		_, _ = os.Stdout.Write(data)
+		_, _ = os.Stdout.Write([]byte("\n"))
+	}
 
 	history.InsertRecord(event, w.historyID)
 
@@ -245,6 +269,9 @@ func (w *StandardWriter) Write(event *ResultEvent) error {
 		}
 		if _, writeErr := w.outputFile.Write(data); writeErr != nil {
 			return errors.Wrap(err, "could not write to output")
+		}
+		if w.AddNewLinesOutputFile && w.json {
+			_, _ = w.outputFile.Write([]byte("\n"))
 		}
 	}
 	return nil
@@ -307,15 +334,39 @@ func (w *StandardWriter) Close() {
 }
 
 // WriteFailure writes the failure event for template to file and/or screen.
-func (w *StandardWriter) WriteFailure(event InternalEvent) error {
+func (w *StandardWriter) WriteFailure(wrappedEvent *InternalWrappedEvent) error {
 	if !w.matcherStatus {
 		return nil
 	}
-	templatePath, templateURL := utils.TemplatePathURL(types.ToString(event["template-path"]))
+	if len(wrappedEvent.Results) > 0 {
+		errs := []error{}
+		for _, result := range wrappedEvent.Results {
+			result.MatcherStatus = false // just in case
+			if err := w.Write(result); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if len(errs) > 0 {
+			return multierr.Combine(errs...)
+		}
+		return nil
+	}
+	// if no results were found, manually create a failure event
+	event := wrappedEvent.InternalEvent
+
+	templatePath, templateURL := utils.TemplatePathURL(types.ToString(event["template-path"]), types.ToString(event["template-id"]))
 	var templateInfo model.Info
 	if event["template-info"] != nil {
 		templateInfo = event["template-info"].(model.Info)
 	}
+	fields := protocolUtils.GetJsonFieldsFromURL(types.ToString(event["host"]))
+	if types.ToString(event["ip"]) != "" {
+		fields.Ip = types.ToString(event["ip"])
+	}
+	if types.ToString(event["path"]) != "" {
+		fields.Path = types.ToString(event["path"])
+	}
+
 	data := &ResultEvent{
 		Template:      templatePath,
 		TemplateURL:   templateURL,
@@ -323,12 +374,33 @@ func (w *StandardWriter) WriteFailure(event InternalEvent) error {
 		TemplatePath:  types.ToString(event["template-path"]),
 		Info:          templateInfo,
 		Type:          types.ToString(event["type"]),
-		Host:          types.ToString(event["host"]),
+		Host:          fields.Host,
+		Path:          fields.Path,
+		Port:          fields.Port,
+		Scheme:        fields.Scheme,
+		URL:           fields.URL,
+		IP:            fields.Ip,
+		Request:       types.ToString(event["request"]),
+		Response:      types.ToString(event["response"]),
 		MatcherStatus: false,
 		Timestamp:     time.Now(),
+		//FIXME: this is workaround to encode the template when no results were found
+		TemplateEncoded: w.encodeTemplate(types.ToString(event["template-path"])),
+		Error:           types.ToString(event["error"]),
 	}
 	return w.Write(data)
 }
+
+var maxTemplateFileSizeForEncoding = 1024 * 1024
+
+func (w *StandardWriter) encodeTemplate(templatePath string) string {
+	data, err := os.ReadFile(templatePath)
+	if err == nil && !w.omitTemplate && len(data) <= maxTemplateFileSizeForEncoding && config.DefaultConfig.IsCustomTemplate(templatePath) {
+		return base64.StdEncoding.EncodeToString(data)
+	}
+	return ""
+}
+
 func sanitizeFileName(fileName string) string {
 	fileName = strings.ReplaceAll(fileName, "http:", "")
 	fileName = strings.ReplaceAll(fileName, "https:", "")

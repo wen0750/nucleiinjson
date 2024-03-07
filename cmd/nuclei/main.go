@@ -3,12 +3,17 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"strings"
 	"time"
+
+	"github.com/projectdiscovery/utils/auth/pdcp"
+	_ "github.com/projectdiscovery/utils/pprof"
 
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
@@ -16,12 +21,17 @@ import (
 	"github.com/projectdiscovery/interactsh/pkg/client"
 	errorutil "github.com/projectdiscovery/utils/errors"
 	fileutil "github.com/projectdiscovery/utils/file"
+	updateutils "github.com/projectdiscovery/utils/update"
 	"github.com/wen0750/nucleiinjson/internal/runner"
 	"github.com/wen0750/nucleiinjson/pkg/catalog/config"
+	"github.com/wen0750/nucleiinjson/pkg/installer"
 	"github.com/wen0750/nucleiinjson/pkg/model/types/severity"
 	"github.com/wen0750/nucleiinjson/pkg/operators/common/dsl"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/uncover"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/http"
+	"github.com/wen0750/nucleiinjson/pkg/templates"
+	"github.com/wen0750/nucleiinjson/pkg/templates/extensions"
+	"github.com/wen0750/nucleiinjson/pkg/templates/signer"
 	templateTypes "github.com/wen0750/nucleiinjson/pkg/templates/types"
 	"github.com/wen0750/nucleiinjson/pkg/types"
 	"github.com/wen0750/nucleiinjson/pkg/types/scanstrategy"
@@ -46,6 +56,44 @@ func main() {
 		return
 	}
 
+	// sign the templates if requested - only glob syntax is supported
+	if options.SignTemplates {
+		// use parsed options when initializing signer instead of default options
+		templates.UseOptionsForSigner(options)
+		tsigner, err := signer.NewTemplateSigner(nil, nil) // will read from env , config or generate new keys
+		if err != nil {
+			gologger.Fatal().Msgf("couldn't initialize signer crypto engine: %s\n", err)
+		}
+
+		successCounter := 0
+		errorCounter := 0
+		for _, item := range options.Templates {
+			err := filepath.WalkDir(item, func(iterItem string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() || !strings.HasSuffix(iterItem, extensions.YAML) {
+					// skip non yaml files
+					return nil
+				}
+
+				if err := templates.SignTemplate(tsigner, iterItem); err != nil {
+					if err != templates.ErrNotATemplate {
+						// skip warnings and errors as given items are not templates
+						errorCounter++
+						gologger.Error().Msgf("could not sign '%s': %s\n", iterItem, err)
+					}
+				} else {
+					successCounter++
+				}
+
+				return nil
+			})
+			if err != nil {
+				gologger.Error().Msgf("%s\n", err)
+			}
+		}
+		gologger.Info().Msgf("All templates signatures were elaborated success=%d failed=%d\n", successCounter, errorCounter)
+		return
+	}
+
 	// Profiling related code
 	if memProfile != "" {
 		f, err := os.Create(memProfile)
@@ -66,17 +114,28 @@ func main() {
 
 	runner.ParseOptions(options)
 
-	if options.HangMonitor {
-		cancel := monitor.NewStackMonitor(10 * time.Second)
-		defer cancel()
-	}
-
 	nucleiRunner, err := runner.New(options)
 	if err != nil {
 		gologger.Fatal().Msgf("Could not create runner: %s\n", err)
 	}
 	if nucleiRunner == nil {
 		return
+	}
+
+	if options.HangMonitor {
+		stackMonitor := monitor.NewStackMonitor()
+		cancel := stackMonitor.Start(10 * time.Second)
+		defer cancel()
+		stackMonitor.RegisterCallback(func(dumpID string) error {
+			resumeFileName := fmt.Sprintf("crash-resume-file-%s.dump", dumpID)
+			if options.EnableCloudUpload {
+				gologger.Info().Msgf("Uploading scan results to cloud...")
+			}
+			nucleiRunner.Close()
+			gologger.Info().Msgf("Creating resume file: %s\n", resumeFileName)
+			err := nucleiRunner.SaveResumeConfig(resumeFileName)
+			return errorutil.NewWithErr(err).Msgf("couldn't create crash resume file")
+		})
 	}
 
 	// Setup graceful exits
@@ -87,6 +146,10 @@ func main() {
 	go func() {
 		for range c {
 			gologger.Info().Msgf("CTRL+C pressed: Exiting\n")
+			gologger.Info().Msgf("Attempting graceful shutdown...")
+			if options.EnableCloudUpload {
+				gologger.Info().Msgf("Uploading scan results to cloud...")
+			}
 			nucleiRunner.Close()
 			if options.ShouldSaveResume() {
 				gologger.Info().Msgf("Creating resume file: %s\n", resumeFileName)
@@ -114,6 +177,11 @@ func main() {
 }
 
 func readConfig() *goflags.FlagSet {
+
+	// when true updates nuclei binary to latest version
+	var updateNucleiBinary bool
+	var pdcpauth bool
+
 	flagSet := goflags.NewFlagSet()
 	flagSet.CaseSensitive = true
 	flagSet.SetDescription(`Nuclei is a fast, template based vulnerability scanner focusing
@@ -122,7 +190,6 @@ on extensive configurability, massive extensibility and ease of use.`)
 	/* TODO Important: The defined default values, especially for slice/array types are NOT DEFAULT VALUES, but rather implicit values to which the user input is appended.
 	This can be very confusing and should be addressed
 	*/
-
 	flagSet.CreateGroup("custominfo", "CustomInfo",
 		flagSet.StringVar(&options.Hid, "hid", "", "history id of this scanning"),
 	)
@@ -130,6 +197,7 @@ on extensive configurability, massive extensibility and ease of use.`)
 	flagSet.CreateGroup("input", "Target",
 		flagSet.StringSliceVarP(&options.Targets, "target", "u", nil, "target URLs/hosts to scan", goflags.StringSliceOptions),
 		flagSet.StringVarP(&options.TargetsFilePath, "list", "l", "", "path to file containing a list of target URLs/hosts to scan (one per line)"),
+		flagSet.StringSliceVarP(&options.ExcludeTargets, "exclude-hosts", "eh", nil, "hosts to exclude to scan from the input list (ip, cidr, hostname)", goflags.FileCommaSeparatedStringSliceOptions),
 		flagSet.StringVar(&options.Resume, "resume", "", "resume scan using resume.cfg (clustering will be disabled)"),
 		flagSet.BoolVarP(&options.ScanAllIPs, "scan-all-ips", "sa", false, "scan all the IP's associated with dns record"),
 		flagSet.StringSliceVarP(&options.IPVersion, "ip-version", "iv", nil, "IP version to scan of hostname (4,6) - (default 4)", goflags.CommaSeparatedStringSliceOptions),
@@ -140,14 +208,16 @@ on extensive configurability, massive extensibility and ease of use.`)
 		flagSet.StringSliceVarP(&options.NewTemplatesWithVersion, "new-templates-version", "ntv", nil, "run new templates added in specific version", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.BoolVarP(&options.AutomaticScan, "automatic-scan", "as", false, "automatic web scan using wappalyzer technology detection to tags mapping"),
 		flagSet.StringSliceVarP(&options.Templates, "templates", "t", nil, "list of template or template directory to run (comma-separated, file)", goflags.FileCommaSeparatedStringSliceOptions),
-		flagSet.StringSliceVarP(&options.TemplateURLs, "template-url", "tu", nil, "list of template urls to run (comma-separated, file)", goflags.FileCommaSeparatedStringSliceOptions),
+		flagSet.StringSliceVarP(&options.TemplateURLs, "template-url", "turl", nil, "template url or list containing template urls to run (comma-separated, file)", goflags.FileCommaSeparatedStringSliceOptions),
 		flagSet.StringSliceVarP(&options.Workflows, "workflows", "w", nil, "list of workflow or workflow directory to run (comma-separated, file)", goflags.FileCommaSeparatedStringSliceOptions),
-		flagSet.StringSliceVarP(&options.WorkflowURLs, "workflow-url", "wu", nil, "list of workflow urls to run (comma-separated, file)", goflags.FileCommaSeparatedStringSliceOptions),
+		flagSet.StringSliceVarP(&options.WorkflowURLs, "workflow-url", "wurl", nil, "workflow url or list containing workflow urls to run (comma-separated, file)", goflags.FileCommaSeparatedStringSliceOptions),
 		flagSet.BoolVar(&options.Validate, "validate", false, "validate the passed templates to nuclei"),
 		flagSet.BoolVarP(&options.NoStrictSyntax, "no-strict-syntax", "nss", false, "disable strict syntax check on templates"),
 		flagSet.BoolVarP(&options.TemplateDisplay, "template-display", "td", false, "displays the templates content"),
 		flagSet.BoolVar(&options.TemplateList, "tl", false, "list all available templates"),
-		flagSet.StringSliceVarConfigOnly(&options.RemoteTemplateDomainList, "remote-template-domain", []string{"api.nuclei.sh"}, "allowed domain list to load remote templates from"),
+		flagSet.StringSliceVarConfigOnly(&options.RemoteTemplateDomainList, "remote-template-domain", []string{"cloud.projectdiscovery.io"}, "allowed domain list to load remote templates from"),
+		flagSet.BoolVar(&options.SignTemplates, "sign", false, "signs the templates with the private key defined in NUCLEI_SIGNATURE_PRIVATE_KEY env variable"),
+		flagSet.BoolVar(&options.EnableCodeTemplates, "code", false, "enable loading code protocol-based templates"),
 	)
 
 	flagSet.CreateGroup("filters", "Filtering",
@@ -176,6 +246,7 @@ on extensive configurability, massive extensibility and ease of use.`)
 		flagSet.BoolVarP(&options.JSONL, "jsonl", "j", false, "write output in JSONL(ines) format"),
 		flagSet.BoolVarP(&options.JSONRequests, "include-rr", "irr", true, "include request/response pairs in the JSON, JSONL, and Markdown outputs (for findings only) [DEPRECATED use `-omit-raw`]"),
 		flagSet.BoolVarP(&options.OmitRawRequests, "omit-raw", "or", false, "omit request/response pairs in the JSON, JSONL, and Markdown outputs (for findings only)"),
+		flagSet.BoolVarP(&options.OmitTemplate, "omit-template", "ot", false, "omit encoded template in the JSON, JSONL output"),
 		flagSet.BoolVarP(&options.NoMeta, "no-meta", "nm", false, "disable printing result metadata in cli output"),
 		flagSet.BoolVarP(&options.Timestamp, "timestamp", "ts", false, "enables printing timestamp in cli output"),
 		flagSet.StringVarP(&options.ReportingDB, "report-db", "rdb", "", "nuclei reporting database (always use this to persist report data)"),
@@ -207,12 +278,13 @@ on extensive configurability, massive extensibility and ease of use.`)
 		flagSet.BoolVarP(&options.ShowMatchLine, "show-match-line", "sml", false, "show match lines for file templates, works with extractors only"),
 		flagSet.BoolVar(&options.ZTLS, "ztls", false, "use ztls library with autofallback to standard one for tls13 [Deprecated] autofallback to ztls is enabled by default"), //nolint:all
 		flagSet.StringVar(&options.SNI, "sni", "", "tls sni hostname to use (default: input domain name)"),
+		flagSet.DurationVarP(&options.DialerTimeout, "dialer-timeout", "dt", 0, "timeout for network requests."),
+		flagSet.DurationVarP(&options.DialerKeepAlive, "dialer-keep-alive", "dka", 0, "keep-alive duration for network requests."),
 		flagSet.BoolVarP(&options.AllowLocalFileAccess, "allow-local-file-access", "lfa", false, "allows file (payload) access anywhere on the system"),
 		flagSet.BoolVarP(&options.RestrictLocalNetworkAccess, "restrict-local-network-access", "lna", false, "blocks connections to the local / private network"),
 		flagSet.StringVarP(&options.Interface, "interface", "i", "", "network interface to use for network scan"),
 		flagSet.StringVarP(&options.AttackType, "attack-type", "at", "", "type of payload combinations to perform (batteringram,pitchfork,clusterbomb)"),
 		flagSet.StringVarP(&options.SourceIP, "source-ip", "sip", "", "source ip address to use for network scan"),
-		flagSet.StringVar(&options.CustomConfigDir, "config-directory", "", "override the default config path ($home/.config)"),
 		flagSet.IntVarP(&options.ResponseReadSize, "response-size-read", "rsr", 10*1024*1024, "max response size to read in bytes"),
 		flagSet.IntVarP(&options.ResponseSaveSize, "response-size-save", "rss", 1*1024*1024, "max response size to read in bytes"),
 		flagSet.CallbackVar(resetCallback, "reset", "reset removes all nuclei configuration and data files (including nuclei-templates)"),
@@ -250,6 +322,7 @@ on extensive configurability, massive extensibility and ease of use.`)
 		flagSet.IntVarP(&options.TemplateThreads, "concurrency", "c", 25, "maximum number of templates to be executed in parallel"),
 		flagSet.IntVarP(&options.HeadlessBulkSize, "headless-bulk-size", "hbs", 10, "maximum number of headless hosts to be analyzed in parallel per template"),
 		flagSet.IntVarP(&options.HeadlessTemplateThreads, "headless-concurrency", "headc", 10, "maximum number of headless templates to be executed in parallel"),
+		flagSet.IntVarP(&options.JsConcurrency, "js-concurrency", "jsc", 120, "maximum number of javascript runtimes to be executed in parallel"),
 	)
 	flagSet.CreateGroup("optimization", "Optimizations",
 		flagSet.IntVar(&options.Timeout, "timeout", 10, "time to wait in seconds before timeout"),
@@ -302,7 +375,7 @@ on extensive configurability, massive extensibility and ease of use.`)
 	)
 
 	flagSet.CreateGroup("update", "Update",
-		flagSet.CallbackVarP(runner.NucleiToolUpdateCallback, "update", "up", "update nuclei engine to the latest released version"),
+		flagSet.BoolVarP(&updateNucleiBinary, "update", "up", false, "update nuclei engine to the latest released version"),
 		flagSet.BoolVarP(&options.UpdateTemplates, "update-templates", "ut", false, "update nuclei-templates to latest released version"),
 		flagSet.StringVarP(&options.NewTemplatesDirectory, "update-template-dir", "ud", "", "custom directory to install / update nuclei-templates"),
 		flagSet.CallbackVarP(disableUpdatesCallback, "disable-update-check", "duc", "disable automatic nuclei/templates update check"),
@@ -312,43 +385,65 @@ on extensive configurability, massive extensibility and ease of use.`)
 		flagSet.BoolVar(&options.EnableProgressBar, "stats", false, "display statistics about the running scan"),
 		flagSet.BoolVarP(&options.StatsJSON, "stats-json", "sj", false, "display statistics in JSONL(ines) format"),
 		flagSet.IntVarP(&options.StatsInterval, "stats-interval", "si", 5, "number of seconds to wait between showing a statistics update"),
-		flagSet.BoolVarP(&options.Metrics, "metrics", "m", false, "expose nuclei metrics on a port"),
 		flagSet.IntVarP(&options.MetricsPort, "metrics-port", "mp", 9092, "port to expose nuclei metrics on"),
 	)
 
 	flagSet.CreateGroup("cloud", "Cloud",
-		flagSet.BoolVar(&options.Cloud, "cloud", false, "run scan on nuclei cloud"),
-		flagSet.StringVarP(&options.AddDatasource, "add-datasource", "ads", "", "add specified data source (s3,github)"),
-		flagSet.StringVarP(&options.AddTarget, "add-target", "atr", "", "add target(s) to cloud"),
-		flagSet.StringVarP(&options.AddTemplate, "add-template", "atm", "", "add template(s) to cloud"),
-		flagSet.BoolVarP(&options.ScanList, "list-scan", "lsn", false, "list previous cloud scans"),
-		flagSet.StringVarP(&options.ScanOutput, "list-output", "lso", "", "list scan output by scan id"),
-		flagSet.BoolVarP(&options.ListTargets, "list-target", "ltr", false, "list cloud target by id"),
-		flagSet.BoolVarP(&options.ListTemplates, "list-template", "ltm", false, "list cloud template by id"),
-		flagSet.BoolVarP(&options.ListDatasources, "list-datasource", "lds", false, "list cloud datasource by id"),
-		flagSet.BoolVarP(&options.ListReportingSources, "list-reportsource", "lrs", false, "list reporting sources"),
-		flagSet.StringVarP(&options.DeleteScan, "delete-scan", "dsn", "", "delete cloud scan by id"),
-		flagSet.StringVarP(&options.RemoveTarget, "delete-target", "dtr", "", "delete target(s) from cloud"),
-		flagSet.StringVarP(&options.RemoveTemplate, "delete-template", "dtm", "", "delete template(s) from cloud"),
-		flagSet.StringVarP(&options.RemoveDatasource, "delete-datasource", "dds", "", "delete specified data source"),
-		flagSet.StringVarP(&options.DisableReportingSource, "disable-reportsource", "drs", "", "disable specified reporting source"),
-		flagSet.StringVarP(&options.EnableReportingSource, "enable-reportsource", "ers", "", "enable specified reporting source"),
-		flagSet.StringVarP(&options.GetTarget, "get-target", "gtr", "", "get target content by id"),
-		flagSet.StringVarP(&options.GetTemplate, "get-template", "gtm", "", "get template content by id"),
-		flagSet.BoolVarP(&options.NoStore, "no-store", "nos", false, "disable scan/output storage on cloud"),
-		flagSet.BoolVar(&options.NoTables, "no-tables", false, "do not display pretty-printed tables"),
-		flagSet.IntVar(&options.OutputLimit, "limit", 100, "limit the number of output to display"),
+		flagSet.BoolVar(&pdcpauth, "auth", false, "configure projectdiscovery cloud (pdcp) api key"),
+		flagSet.BoolVarP(&options.EnableCloudUpload, "cloud-upload", "cup", false, "upload scan results to pdcp dashboard"),
+		flagSet.StringVarP(&options.ScanID, "scan-id", "sid", "", "upload scan results to given scan id"),
 	)
 
+	flagSet.SetCustomHelpText(`EXAMPLES:
+Run nuclei on single host:
+	$ nuclei -target example.com
+
+Run nuclei with specific template directories:
+	$ nuclei -target example.com -t http/cves/ -t ssl
+
+Run nuclei against a list of hosts:
+	$ nuclei -list hosts.txt
+
+Run nuclei with a JSON output:
+	$ nuclei -target example.com -json-export output.json
+
+Run nuclei with sorted Markdown outputs (with environment variables):
+	$ MARKDOWN_EXPORT_SORT_MODE=template nuclei -target example.com -markdown-export nuclei_report/
+
+Additional documentation is available at: https://docs.nuclei.sh/getting-started/running
+	`)
+
+	// nuclei has multiple migrations
+	// ex: resume.cfg moved to platform standard cache dir from config dir
+	// ex: config.yaml moved to platform standard config dir from linux specific config dir
+	// and hence it will be attempted in config package during init
+	goflags.DisableAutoConfigMigration = true
 	_ = flagSet.Parse()
 
+	if pdcpauth {
+		runner.AuthWithPDCP()
+	}
+
 	gologger.DefaultLogger.SetTimestamp(options.Timestamp, levels.LevelDebug)
+
+	if options.VerboseVerbose {
+		// hide release notes if silent mode is enabled
+		installer.HideReleaseNotes = false
+	}
+
+	if options.Timeout > 30 {
+		// default github binary/template download timeout is 30 sec
+		updateutils.DownloadUpdateTimeout = time.Duration(options.Timeout) * time.Second
+	}
+	if updateNucleiBinary {
+		runner.NucleiToolUpdateCallback()
+	}
 
 	if options.LeaveDefaultPorts {
 		http.LeaveDefaultPorts = true
 	}
-	if options.CustomConfigDir != "" {
-		config.DefaultConfig.SetConfigDir(options.CustomConfigDir)
+	if customConfigDir := os.Getenv(config.NucleiConfigDirEnv); customConfigDir != "" {
+		config.DefaultConfig.SetConfigDir(customConfigDir)
 		readFlagsConfig(flagSet)
 	}
 	if cfgFile != "" {
@@ -370,7 +465,7 @@ on extensive configurability, massive extensibility and ease of use.`)
 
 // cleanupOldResumeFiles cleans up resume files older than 10 days.
 func cleanupOldResumeFiles() {
-	root := config.DefaultConfig.GetConfigDir()
+	root := config.DefaultConfig.GetCacheDir()
 	filter := fileutil.FileFilters{
 		OlderThan: 24 * time.Hour * 10, // cleanup on the 10th day
 		Prefix:    "resume-",
@@ -415,6 +510,9 @@ func disableUpdatesCallback() {
 // printVersion prints the nuclei version and exits.
 func printVersion() {
 	gologger.Info().Msgf("Nuclei Engine Version: %s", config.Version)
+	gologger.Info().Msgf("Nuclei Config Directory: %s", config.DefaultConfig.GetConfigDir())
+	gologger.Info().Msgf("Nuclei Cache Directory: %s", config.DefaultConfig.GetCacheDir()) // cache dir contains resume files
+	gologger.Info().Msgf("PDCP Directory: %s", pdcp.PDCPDir)
 	os.Exit(0)
 }
 
@@ -426,11 +524,11 @@ func printTemplateVersion() {
 	if fileutil.FolderExists(cfg.CustomS3TemplatesDirectory) {
 		gologger.Info().Msgf("Custom S3 templates location: %s\n", cfg.CustomS3TemplatesDirectory)
 	}
-	if fileutil.FolderExists(cfg.CustomGithubTemplatesDirectory) {
-		gologger.Info().Msgf("Custom Github templates location: %s ", cfg.CustomGithubTemplatesDirectory)
+	if fileutil.FolderExists(cfg.CustomGitHubTemplatesDirectory) {
+		gologger.Info().Msgf("Custom GitHub templates location: %s ", cfg.CustomGitHubTemplatesDirectory)
 	}
 	if fileutil.FolderExists(cfg.CustomGitLabTemplatesDirectory) {
-		gologger.Info().Msgf("Custom Gitlab templates location: %s ", cfg.CustomGitLabTemplatesDirectory)
+		gologger.Info().Msgf("Custom GitLab templates location: %s ", cfg.CustomGitLabTemplatesDirectory)
 	}
 	if fileutil.FolderExists(cfg.CustomAzureTemplatesDirectory) {
 		gologger.Info().Msgf("Custom Azure templates location: %s ", cfg.CustomAzureTemplatesDirectory)
