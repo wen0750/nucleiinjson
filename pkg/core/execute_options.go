@@ -6,6 +6,7 @@ import (
 
 	"github.com/remeh/sizedwaitgroup"
 
+	"github.com/projectdiscovery/gologger"
 	stringsutil "github.com/projectdiscovery/utils/strings"
 	"github.com/wen0750/nucleiinjson/pkg/output"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/contextargs"
@@ -29,16 +30,39 @@ func (e *Engine) ExecuteWithResults(templatesList []*templates.Template, target 
 	return e.ExecuteScanWithOpts(templatesList, target, false)
 }
 
-// ExecuteScanWithOpts executes scan with given scanStatergy
+// ExecuteScanWithOpts executes scan with given scanStrategy
 func (e *Engine) ExecuteScanWithOpts(templatesList []*templates.Template, target InputProvider, noCluster bool) *atomic.Bool {
 	results := &atomic.Bool{}
 	selfcontainedWg := &sync.WaitGroup{}
 
+	totalReqBeforeCluster := getRequestCount(templatesList) * int(target.Count())
+
+	// attempt to cluster templates if noCluster is false
 	var finalTemplates []*templates.Template
+	clusterCount := 0
 	if !noCluster {
-		finalTemplates, _ = templates.ClusterTemplates(templatesList, e.executerOpts)
+		finalTemplates, clusterCount = templates.ClusterTemplates(templatesList, e.executerOpts)
 	} else {
 		finalTemplates = templatesList
+	}
+
+	totalReqAfterClustering := getRequestCount(finalTemplates) * int(target.Count())
+
+	if !noCluster && totalReqAfterClustering < totalReqBeforeCluster {
+		gologger.Info().Msgf("Templates clustered: %d (Reduced %d Requests)", clusterCount, totalReqBeforeCluster-totalReqAfterClustering)
+	}
+
+	// 0 matches means no templates were found in the directory
+	if len(finalTemplates) == 0 {
+		return &atomic.Bool{}
+	}
+
+	if e.executerOpts.Progress != nil {
+		// Notes:
+		// workflow requests are not counted as they can be conditional
+		// templateList count is user requested templates count (before clustering)
+		// totalReqAfterClustering is total requests count after clustering
+		e.executerOpts.Progress.Init(target.Count(), len(templatesList), int64(totalReqAfterClustering))
 	}
 
 	if stringsutil.EqualFoldAny(e.options.ScanStrategy, scanstrategy.Auto.String(), "") {
@@ -121,4 +145,18 @@ func (e *Engine) executeHostSpray(templatesList []*templates.Template, target In
 	})
 	wp.Wait()
 	return results
+}
+
+// returns total requests count
+func getRequestCount(templates []*templates.Template) int {
+	count := 0
+	for _, template := range templates {
+		// ignore requests in workflows as total requests in workflow
+		// depends on what templates will be called in workflow
+		if len(template.Workflows) > 0 {
+			continue
+		}
+		count += template.TotalRequests
+	}
+	return count
 }

@@ -68,6 +68,7 @@ func init() {
 	defaultOpts := types.DefaultOptions()
 	// need to set headless to true for headless templates
 	defaultOpts.Headless = true
+	defaultOpts.EnableCodeTemplates = true
 	if err := protocolstate.Init(defaultOpts); err != nil {
 		gologger.Fatal().Msgf("Could not initialize protocol state: %s\n", err)
 	}
@@ -90,7 +91,7 @@ type options struct {
 func main() {
 	opts := options{}
 	flagSet := goflags.NewFlagSet()
-	flagSet.SetDescription(`TemplateMan CLI is baisc utility built on the TemplateMan API to standardize nuclei templates.`)
+	flagSet.SetDescription(`TemplateMan CLI is basic utility built on the TemplateMan API to standardize nuclei templates.`)
 
 	flagSet.CreateGroup("Input", "input",
 		flagSet.StringVarP(&opts.input, "input", "i", "", "Templates to annotate"),

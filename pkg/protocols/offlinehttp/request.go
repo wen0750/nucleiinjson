@@ -12,6 +12,7 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/output"
 	"github.com/wen0750/nucleiinjson/pkg/protocols"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/contextargs"
+	"github.com/wen0750/nucleiinjson/pkg/protocols/common/generators"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/helpers/eventcreator"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/tostring"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/utils"
@@ -86,6 +87,11 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, metadata 
 			}
 
 			outputEvent := request.responseToDSLMap(resp, data, data, data, tostring.UnsafeToString(dumpedResponse), tostring.UnsafeToString(body), utils.HeadersToString(resp.Header), 0, nil)
+			// add response fields to template context and merge templatectx variables to output event
+			request.options.AddTemplateVars(input.MetaInput, request.Type(), request.GetID(), outputEvent)
+			if request.options.HasTemplateCtx(input.MetaInput) {
+				outputEvent = generators.MergeMaps(outputEvent, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+			}
 			outputEvent["ip"] = ""
 			for k, v := range previous {
 				outputEvent[k] = v

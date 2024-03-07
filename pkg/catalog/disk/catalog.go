@@ -4,6 +4,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+
+	"github.com/wen0750/nucleiinjson/pkg/catalog/config"
 )
 
 // DiskCatalog is a template catalog helper implementation based on disk
@@ -19,7 +21,7 @@ func NewCatalog(directory string) *DiskCatalog {
 	if directory != "" {
 		catalog.templatesFS = os.DirFS(directory)
 	} else {
-		catalog.templatesFS = os.DirFS("./")
+		catalog.templatesFS = os.DirFS(config.DefaultConfig.GetTemplateDir())
 	}
 	return catalog
 }

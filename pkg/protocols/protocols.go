@@ -1,12 +1,18 @@
 package protocols
 
 import (
+	"encoding/base64"
+	"sync/atomic"
+
 	"github.com/projectdiscovery/ratelimit"
+	mapsutil "github.com/projectdiscovery/utils/maps"
+	stringsutil "github.com/projectdiscovery/utils/strings"
 
 	"github.com/logrusorgru/aurora"
 
 	"github.com/wen0750/nucleiinjson/pkg/catalog"
 	"github.com/wen0750/nucleiinjson/pkg/input"
+	"github.com/wen0750/nucleiinjson/pkg/js/compiler"
 	"github.com/wen0750/nucleiinjson/pkg/model"
 	"github.com/wen0750/nucleiinjson/pkg/operators"
 	"github.com/wen0750/nucleiinjson/pkg/operators/extractors"
@@ -21,8 +27,16 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/variables"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/headless/engine"
 	"github.com/wen0750/nucleiinjson/pkg/reporting"
+	"github.com/wen0750/nucleiinjson/pkg/scan"
 	templateTypes "github.com/wen0750/nucleiinjson/pkg/templates/types"
 	"github.com/wen0750/nucleiinjson/pkg/types"
+)
+
+// Optional Callback to update Thread count in payloads across all requests
+type PayloadThreadSetterCallback func(opts *ExecutorOptions, totalRequests, currentThreads int) int
+
+var (
+	MaxTemplateFileSizeForEncoding = 1024 * 1024
 )
 
 // Executer is an interface implemented any protocol based request executer.
@@ -32,9 +46,9 @@ type Executer interface {
 	// Requests returns the total number of requests the rule will perform
 	Requests() int
 	// Execute executes the protocol group and returns true or false if results were found.
-	Execute(input *contextargs.Context) (bool, error)
+	Execute(ctx *scan.ScanContext) (bool, error)
 	// ExecuteWithResults executes the protocol requests and returns results instead of writing them.
-	ExecuteWithResults(input *contextargs.Context, callback OutputEventCallback) error
+	ExecuteWithResults(ctx *scan.ScanContext) ([]*output.ResultEvent, error)
 }
 
 // ExecutorOptions contains the configuration options for executer clients
@@ -45,6 +59,8 @@ type ExecutorOptions struct {
 	TemplatePath string
 	// TemplateInfo contains information block of the template request
 	TemplateInfo model.Info
+	// RawTemplate is the raw template for the request
+	RawTemplate []byte
 	// Output is a writer interface for writing output events from executer.
 	Output output.Writer
 	// Options contains configuration options for the executer.
@@ -85,11 +101,119 @@ type ExecutorOptions struct {
 	Colorizer      aurora.Aurora
 	WorkflowLoader model.WorkflowLoader
 	ResumeCfg      *types.ResumeCfg
+	// ProtocolType is the type of the template
+	ProtocolType templateTypes.ProtocolType
+	// Flow is execution flow for the template (written in javascript)
+	Flow string
+	// IsMultiProtocol is true if template has more than one protocol
+	IsMultiProtocol bool
+	// templateStore is a map which contains template context for each scan  (i.e input * template-id pair)
+	templateCtxStore *mapsutil.SyncLockMap[string, *contextargs.Context]
+	// JsCompiler is abstracted javascript compiler which adds node modules and provides execution
+	// environment for javascript templates
+	JsCompiler *compiler.Compiler
+	// Optional Callback function to update Thread count in payloads across all protocols
+	// based on given logic. by default nuclei reverts to using value of `-c` when threads count
+	// is not specified or is 0 in template
+	OverrideThreadsCount PayloadThreadSetterCallback
+}
+
+// GetThreadsForPayloadRequests returns the number of threads to use as default for
+// given max-request of payloads
+func (e *ExecutorOptions) GetThreadsForNPayloadRequests(totalRequests int, currentThreads int) int {
+	if e.OverrideThreadsCount != nil {
+		return e.OverrideThreadsCount(e, totalRequests, currentThreads)
+	}
+	if currentThreads != 0 {
+		return currentThreads
+	}
+	if totalRequests <= 0 {
+		return e.Options.TemplateThreads
+	}
+	return totalRequests
+}
+
+// CreateTemplateCtxStore creates template context store (which contains templateCtx for every scan)
+func (e *ExecutorOptions) CreateTemplateCtxStore() {
+	e.templateCtxStore = &mapsutil.SyncLockMap[string, *contextargs.Context]{
+		Map:      make(map[string]*contextargs.Context),
+		ReadOnly: atomic.Bool{},
+	}
+}
+
+// RemoveTemplateCtx removes template context of given scan from store
+func (e *ExecutorOptions) RemoveTemplateCtx(input *contextargs.MetaInput) {
+	scanId := input.GetScanHash(e.TemplateID)
+	if e.templateCtxStore != nil {
+		e.templateCtxStore.Delete(scanId)
+	}
+}
+
+// HasTemplateCtx returns true if template context exists for given input
+func (e *ExecutorOptions) HasTemplateCtx(input *contextargs.MetaInput) bool {
+	scanId := input.GetScanHash(e.TemplateID)
+	if e.templateCtxStore != nil {
+		return e.templateCtxStore.Has(scanId)
+	}
+	return false
+}
+
+// GetTemplateCtx returns template context for given input
+func (e *ExecutorOptions) GetTemplateCtx(input *contextargs.MetaInput) *contextargs.Context {
+	scanId := input.GetScanHash(e.TemplateID)
+	templateCtx, ok := e.templateCtxStore.Get(scanId)
+	if !ok {
+		// if template context does not exist create new and add it to store and return it
+		templateCtx = contextargs.New()
+		templateCtx.MetaInput = input
+		_ = e.templateCtxStore.Set(scanId, templateCtx)
+	}
+	return templateCtx
+}
+
+// AddTemplateVars adds vars to template context with given template type as prefix
+// this method is no-op if template is not multi protocol
+func (e *ExecutorOptions) AddTemplateVars(input *contextargs.MetaInput, reqType templateTypes.ProtocolType, reqID string, vars map[string]interface{}) {
+	// if we wan't to disable adding response variables and other variables to template context
+	// this is the statement that does it . template context is currently only enabled for
+	// multiprotocol and flow templates
+	if !e.IsMultiProtocol && e.Flow == "" {
+		// no-op if not multi protocol template or flow template
+		return
+	}
+	templateCtx := e.GetTemplateCtx(input)
+	for k, v := range vars {
+		if !stringsutil.EqualFoldAny(k, "template-id", "template-info", "template-path") {
+			if reqID != "" {
+				k = reqID + "_" + k
+			} else if reqType < templateTypes.InvalidProtocol {
+				k = reqType.String() + "_" + k
+			}
+			templateCtx.Set(k, v)
+		}
+	}
+}
+
+// AddTemplateVar adds given var to template context with given template type as prefix
+// this method is no-op if template is not multi protocol
+func (e *ExecutorOptions) AddTemplateVar(input *contextargs.MetaInput, templateType templateTypes.ProtocolType, reqID string, key string, value interface{}) {
+	if !e.IsMultiProtocol && e.Flow == "" {
+		// no-op if not multi protocol template or flow template
+		return
+	}
+	templateCtx := e.GetTemplateCtx(input)
+	if reqID != "" {
+		key = reqID + "_" + key
+	} else if templateType < templateTypes.InvalidProtocol {
+		key = templateType.String() + "_" + key
+	}
+	templateCtx.Set(key, value)
 }
 
 // Copy returns a copy of the executeroptions structure
 func (e ExecutorOptions) Copy() ExecutorOptions {
 	copy := e
+	copy.CreateTemplateCtxStore()
 	return copy
 }
 
@@ -125,7 +249,17 @@ type Request interface {
 type OutputEventCallback func(result *output.InternalWrappedEvent)
 
 func MakeDefaultResultEvent(request Request, wrapped *output.InternalWrappedEvent) []*output.ResultEvent {
+	// Note: operator result is generated if something was succesfull match/extract/dynamic-extract
+	// but results should not be generated if
+	// 1. no match was found and some dynamic values were extracted
+	// 2. if something was extracted (matchers exist but no match was found)
 	if len(wrapped.OperatorsResult.DynamicValues) > 0 && !wrapped.OperatorsResult.Matched {
+		return nil
+	}
+	// check if something was extracted (except dynamic values)
+	extracted := len(wrapped.OperatorsResult.Extracts) > 0 || len(wrapped.OperatorsResult.OutputExtracts) > 0
+	if extracted && len(wrapped.OperatorsResult.Operators.Matchers) > 0 && !wrapped.OperatorsResult.Matched {
+		// if extracted and matchers exist but no match was found then don't generate result
 		return nil
 	}
 
@@ -205,6 +339,15 @@ func MakeDefaultMatchFunc(data map[string]interface{}, matcher *matchers.Matcher
 		return matcher.ResultWithMatchedSnippet(matcher.MatchBinary(item))
 	case matchers.DSLMatcher:
 		return matcher.Result(matcher.MatchDSL(data)), nil
+	case matchers.XPathMatcher:
+		return matcher.Result(matcher.MatchXPath(item)), []string{}
 	}
 	return false, nil
+}
+
+func (e *ExecutorOptions) EncodeTemplate() string {
+	if !e.Options.OmitTemplate && len(e.RawTemplate) <= MaxTemplateFileSizeForEncoding {
+		return base64.StdEncoding.EncodeToString(e.RawTemplate)
+	}
+	return ""
 }

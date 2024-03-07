@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/corpix/uarand"
 	"github.com/pkg/errors"
+	"github.com/projectdiscovery/useragent"
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/rawhttp"
@@ -26,6 +28,7 @@ import (
 	protocolutils "github.com/wen0750/nucleiinjson/pkg/protocols/utils"
 	httputil "github.com/wen0750/nucleiinjson/pkg/protocols/utils/http"
 	"github.com/wen0750/nucleiinjson/pkg/types"
+	"github.com/wen0750/nucleiinjson/pkg/types/scanstrategy"
 )
 
 // ErrEvalExpression
@@ -70,6 +73,13 @@ func (r *requestGenerator) Make(ctx context.Context, input *contextargs.Context,
 	// value of `reqData` depends on the type of request specified in template
 	// 1. If request is raw request =  reqData contains raw request (i.e http request dump)
 	// 2. If request is Normal ( simply put not a raw request) (Ex: with placeholders `path`) = reqData contains relative path
+
+	// add template context values to dynamicValues (this takes care of self-contained and other types of requests)
+	// Note: `iterate-all` and flow are mutually exclusive. flow uses templateCtx and iterate-all uses dynamicValues
+	if r.request.options.HasTemplateCtx(input.MetaInput) {
+		// skip creating template context if not available
+		dynamicValues = generators.MergeMaps(dynamicValues, r.request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	}
 	if r.request.SelfContained {
 		return r.makeSelfContainedRequest(ctx, reqData, payloads, dynamicValues)
 	}
@@ -82,7 +92,7 @@ func (r *requestGenerator) Make(ctx context.Context, input *contextargs.Context,
 		}
 	} else {
 		for payloadName, payloadValue := range payloads {
-			payloads[payloadName] = types.ToString(payloadValue)
+			payloads[payloadName] = types.ToStringNSlice(payloadValue)
 		}
 	}
 
@@ -127,7 +137,7 @@ func (r *requestGenerator) Make(ctx context.Context, input *contextargs.Context,
 	finalVars := generators.MergeMaps(allVars, payloads)
 
 	if vardump.EnableVarDump {
-		gologger.Debug().Msgf("Final Protocol request variables: \n%s\n", vardump.DumpVariables(finalVars))
+		gologger.Debug().Msgf("HTTP Protocol request variables: \n%s\n", vardump.DumpVariables(finalVars))
 	}
 
 	// Note: If possible any changes to current logic (i.e evaluate -> then parse URL)
@@ -253,7 +263,7 @@ func (r *requestGenerator) generateHttpRequest(ctx context.Context, urlx *urluti
 	return &generatedRequest{request: request, meta: generatorValues, original: r.request, dynamicValues: finalVars, interactshURLs: r.interactshURLs}, nil
 }
 
-// generateRawRequest generates Raw Request from from request data from template and variables
+// generateRawRequest generates Raw Request from request data from template and variables
 // finalVars = contains all variables including generator and protocol specific variables
 // generatorValues = contains variables used in fuzzing or other generator specific values
 func (r *requestGenerator) generateRawRequest(ctx context.Context, rawRequest string, baseURL *urlutil.URL, finalVars, generatorValues map[string]interface{}) (*generatedRequest, error) {
@@ -275,6 +285,9 @@ func (r *requestGenerator) generateRawRequest(ctx context.Context, rawRequest st
 		if len(r.options.Options.CustomHeaders) > 0 {
 			_ = rawRequestData.TryFillCustomHeaders(r.options.Options.CustomHeaders)
 		}
+		if rawRequestData.Data != "" && !stringsutil.EqualFoldAny(rawRequestData.Method, http.MethodHead, http.MethodGet) && rawRequestData.Headers["Transfer-Encoding"] != "chunked" {
+			rawRequestData.Headers["Content-Length"] = strconv.Itoa(len(rawRequestData.Data))
+		}
 		unsafeReq := &generatedRequest{rawRequest: rawRequestData, meta: generatorValues, original: r.request, interactshURLs: r.interactshURLs}
 		return unsafeReq, nil
 	}
@@ -287,6 +300,12 @@ func (r *requestGenerator) generateRawRequest(ctx context.Context, rawRequest st
 	if err != nil {
 		return nil, err
 	}
+
+	// force transfer encoding if conditions are met
+	if len(rawRequestData.Data) > 0 && req.Header.Get("Transfer-Encoding") != "chunked" && !stringsutil.EqualFoldAny(rawRequestData.Method, http.MethodGet, http.MethodHead) {
+		req.ContentLength = int64(len(rawRequestData.Data))
+	}
+
 	// override the body with a new one that will be used to read the request body in parallel threads
 	// for race condition testing
 	if r.request.Threads > 0 && r.request.Race {
@@ -341,7 +360,7 @@ func (r *requestGenerator) fillRequest(req *retryablehttp.Request, values map[st
 	}
 
 	// In case of multiple threads the underlying connection should remain open to allow reuse
-	if r.request.Threads <= 0 && req.Header.Get("Connection") == "" {
+	if r.request.Threads <= 0 && req.Header.Get("Connection") == "" && r.options.Options.ScanStrategy != scanstrategy.HostSpray.String() {
 		req.Close = true
 	}
 
@@ -362,7 +381,8 @@ func (r *requestGenerator) fillRequest(req *retryablehttp.Request, values map[st
 		req.Body = bodyReader
 	}
 	if !r.request.Unsafe {
-		httputil.SetHeader(req, "User-Agent", uarand.GetRandom())
+		userAgent := useragent.PickRandom()
+		httputil.SetHeader(req, "User-Agent", userAgent.Raw)
 	}
 
 	// Only set these headers on non-raw requests

@@ -14,20 +14,20 @@ func getTemplatePath() string {
 
 var templatesPathTestCases = []TestCaseInfo{
 	//template folder path issue
-	{Path: "http/get.yaml", TestCase: &folderPathTemplateTest{}},
+	{Path: "protocols/http/get.yaml", TestCase: &folderPathTemplateTest{}},
 	//cwd
-	{Path: "./dns/cname-fingerprint.yaml", TestCase: &cwdTemplateTest{}},
+	{Path: "./dns/detect-dangling-cname.yaml", TestCase: &cwdTemplateTest{}},
 	//relative path
-	{Path: "dns/cname-fingerprint.yaml", TestCase: &relativePathTemplateTest{}},
+	{Path: "dns/dns-saas-service-detection.yaml", TestCase: &relativePathTemplateTest{}},
 	//absolute path
-	{Path: fmt.Sprintf("%v/dns/cname-fingerprint.yaml", getTemplatePath()), TestCase: &absolutePathTemplateTest{}},
+	{Path: fmt.Sprintf("%v/dns/dns-saas-service-detection.yaml", getTemplatePath()), TestCase: &absolutePathTemplateTest{}},
 }
 
 type cwdTemplateTest struct{}
 
 // Execute executes a test case and returns an error if occurred
 func (h *cwdTemplateTest) Execute(filePath string) error {
-	results, err := testutils.RunNucleiTemplateAndGetResults(filePath, "8x8exch02.8x8.com", debug)
+	results, err := testutils.RunNucleiTemplateAndGetResults(filePath, "8x8exch02.8x8.com", debug, "-ms")
 	if err != nil {
 		return err
 	}

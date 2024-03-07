@@ -100,6 +100,10 @@ func (c *Client) poll() error {
 
 	err = interactsh.StartPolling(c.pollDuration, func(interaction *server.Interaction) {
 		request, err := c.requests.Get(interaction.UniqueID)
+		// for more context in github actions
+		if strings.EqualFold(os.Getenv("GITHUB_ACTIONS"), "true") && c.options.Debug {
+			gologger.DefaultLogger.Print().Msgf("[Interactsh]: got interaction of %v for request %v and error %v", interaction, request, err)
+		}
 		if errors.Is(err, gcache.KeyNotFoundError) || request == nil {
 			// If we don't have any request for this ID, add it to temporary
 			// lru cache, so we can correlate when we get an add request.
@@ -128,7 +132,7 @@ func (c *Client) poll() error {
 	return nil
 }
 
-// requestShouldStopAtFirstmatch checks if furthur interactions should be stopped
+// requestShouldStopAtFirstmatch checks if further interactions should be stopped
 // note: extra care should be taken while using this function since internalEvent is
 // synchronized all the time and if caller functions has already acquired lock its best to explicitly specify that
 // we could use `TryLock()` but that may over complicate things and need to differentiate
@@ -147,14 +151,39 @@ func requestShouldStopAtFirstMatch(request *RequestData) bool {
 
 // processInteractionForRequest processes an interaction for a request
 func (c *Client) processInteractionForRequest(interaction *server.Interaction, data *RequestData) bool {
+	var result *operators.Result
+	var matched bool
+	defer func() {
+		if r := recover(); r != nil {
+			gologger.Error().Msgf("panic occurred while processing interaction with result=%v matched=%v err=%v", result, matched, r)
+		}
+	}()
 	data.Event.Lock()
 	data.Event.InternalEvent["interactsh_protocol"] = interaction.Protocol
-	data.Event.InternalEvent["interactsh_request"] = interaction.RawRequest
+	if strings.EqualFold(interaction.Protocol, "dns") {
+		data.Event.InternalEvent["interactsh_request"] = strings.ToLower(interaction.RawRequest)
+	} else {
+		data.Event.InternalEvent["interactsh_request"] = interaction.RawRequest
+	}
 	data.Event.InternalEvent["interactsh_response"] = interaction.RawResponse
 	data.Event.InternalEvent["interactsh_ip"] = interaction.RemoteAddress
 	data.Event.Unlock()
 
-	result, matched := data.Operators.Execute(data.Event.InternalEvent, data.MatchFunc, data.ExtractFunc, c.options.Debug || c.options.DebugRequest || c.options.DebugResponse)
+	if data.Operators != nil {
+		result, matched = data.Operators.Execute(data.Event.InternalEvent, data.MatchFunc, data.ExtractFunc, c.options.Debug || c.options.DebugRequest || c.options.DebugResponse)
+	} else {
+		// this is most likely a bug so error instead of warning
+		var templateID string
+		if data.Event.InternalEvent != nil {
+			templateID = fmt.Sprint(data.Event.InternalEvent[templateIdAttribute])
+		}
+		gologger.Error().Msgf("missing compiled operators for '%v' template", templateID)
+	}
+
+	// for more context in github actions
+	if strings.EqualFold(os.Getenv("GITHUB_ACTIONS"), "true") && c.options.Debug {
+		gologger.DefaultLogger.Print().Msgf("[Interactsh]: got result %v and status %v after processing interaction", result, matched)
+	}
 
 	// if we don't match, return
 	if !matched || result == nil {
@@ -179,7 +208,9 @@ func (c *Client) processInteractionForRequest(interaction *server.Interaction, d
 		c.debugPrintInteraction(interaction, data.Event.OperatorsResult)
 	}
 
-	if writer.WriteResult(data.Event, c.options.Output, c.options.Progress, c.options.IssuesClient) {
+	// if event is not already matched, write it to output
+	if !data.Event.InteractshMatched.Load() && writer.WriteResult(data.Event, c.options.Output, c.options.Progress, c.options.IssuesClient) {
+		data.Event.InteractshMatched.Store(true)
 		c.matched.Store(true)
 		if requestShouldStopAtFirstMatch(data) || c.options.StopAtFirstMatch {
 			_ = c.matchedTemplates.SetWithExpire(hash(data.Event.InternalEvent), true, defaultInteractionDuration)

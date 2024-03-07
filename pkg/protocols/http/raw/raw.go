@@ -36,7 +36,10 @@ func Parse(request string, inputURL *urlutil.URL, unsafe, disablePathAutomerge b
 	// If path is empty do not tamper input url (see doc)
 	// can be omitted but makes things clear
 	case rawrequest.Path == "":
-		rawrequest.Path = inputURL.GetRelativePath()
+		if !disablePathAutomerge {
+			inputURL.Params.IncludeEquals = true
+			rawrequest.Path = inputURL.GetRelativePath()
+		}
 
 	// full url provided instead of rel path
 	case strings.HasPrefix(rawrequest.Path, "http") && !unsafe:
@@ -45,6 +48,7 @@ func Parse(request string, inputURL *urlutil.URL, unsafe, disablePathAutomerge b
 			return nil, errorutil.NewWithErr(err).WithTag("raw").Msgf("failed to parse url %v from template", rawrequest.Path)
 		}
 		cloned := inputURL.Clone()
+		cloned.Params.IncludeEquals = true
 		if disablePathAutomerge {
 			cloned.Path = ""
 		}
@@ -53,10 +57,11 @@ func Parse(request string, inputURL *urlutil.URL, unsafe, disablePathAutomerge b
 			return nil, errorutil.NewWithTag("raw", "could not automergepath for template path %v", urlx.GetRelativePath()).Wrap(parseErr)
 		}
 		rawrequest.Path = cloned.GetRelativePath()
-	// If unsafe changes must be made in raw request string iteself
+	// If unsafe changes must be made in raw request string itself
 	case unsafe:
 		prevPath := rawrequest.Path
 		cloned := inputURL.Clone()
+		cloned.Params.IncludeEquals = true
 		unsafeRelativePath := ""
 		if (cloned.Path == "" || cloned.Path == "/") && !strings.HasPrefix(prevPath, "/") {
 			// Edgecase if raw unsafe request is
@@ -88,6 +93,7 @@ func Parse(request string, inputURL *urlutil.URL, unsafe, disablePathAutomerge b
 
 	default:
 		cloned := inputURL.Clone()
+		cloned.Params.IncludeEquals = true
 		if disablePathAutomerge {
 			cloned.Path = ""
 		}
@@ -102,7 +108,11 @@ func Parse(request string, inputURL *urlutil.URL, unsafe, disablePathAutomerge b
 		if _, ok := rawrequest.Headers["Host"]; !ok {
 			rawrequest.Headers["Host"] = inputURL.Host
 		}
-		rawrequest.FullURL = fmt.Sprintf("%s://%s%s", inputURL.Scheme, strings.TrimSpace(inputURL.Host), rawrequest.Path)
+		cloned := inputURL.Clone()
+		cloned.Params.IncludeEquals = true
+		cloned.Path = ""
+		_ = cloned.MergePath(rawrequest.Path, true)
+		rawrequest.FullURL = cloned.String()
 	}
 
 	return rawrequest, nil

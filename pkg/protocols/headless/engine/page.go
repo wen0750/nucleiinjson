@@ -13,6 +13,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/contextargs"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/utils"
+	"github.com/wen0750/nucleiinjson/pkg/types"
 )
 
 // Page is a single page in an isolated browser instance
@@ -38,8 +39,9 @@ type HistoryData struct {
 
 // Options contains additional configuration options for the browser instance
 type Options struct {
-	Timeout     time.Duration
-	CookieReuse bool
+	Timeout       time.Duration
+	DisableCookie bool
+	Options       *types.Options
 }
 
 // Run runs a list of actions by creating a new page in the browser.
@@ -106,7 +108,7 @@ func (i *Instance) Run(input *contextargs.Context, actions []*Action, payloads m
 		return nil, nil, err
 	}
 
-	if options.CookieReuse {
+	if !options.DisableCookie {
 		if cookies := input.CookieJar.Cookies(URL); len(cookies) > 0 {
 			var NetworkCookies []*proto.NetworkCookie
 			for _, cookie := range cookies {
@@ -139,9 +141,9 @@ func (i *Instance) Run(input *contextargs.Context, actions []*Action, payloads m
 		return nil, nil, err
 	}
 
-	if options.CookieReuse {
+	if !options.DisableCookie {
 		// at the end of actions pull out updated cookies from the browser and inject them into the shared cookie jar
-		if cookies, err := page.Cookies([]string{URL.String()}); options.CookieReuse && err == nil && len(cookies) > 0 {
+		if cookies, err := page.Cookies([]string{URL.String()}); !options.DisableCookie && err == nil && len(cookies) > 0 {
 			var httpCookies []*http.Cookie
 			for _, cookie := range cookies {
 				httpCookie := &http.Cookie{

@@ -10,12 +10,13 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/progress"
 	"github.com/wen0750/nucleiinjson/pkg/protocols"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/contextargs"
+	"github.com/wen0750/nucleiinjson/pkg/scan"
 	"github.com/wen0750/nucleiinjson/pkg/types"
 	"github.com/wen0750/nucleiinjson/pkg/workflows"
 )
 
 func TestWorkflowsSimple(t *testing.T) {
-	progressBar, _ := progress.NewStatsTicker(0, false, false, false, false, 0)
+	progressBar, _ := progress.NewStatsTicker(0, false, false, false, 0)
 
 	workflow := &workflows.Workflow{Options: &protocols.ExecutorOptions{Options: &types.Options{TemplateThreads: 10}}, Workflows: []*workflows.WorkflowTemplate{
 		{Executers: []*workflows.ProtocolExecuterPair{{
@@ -24,12 +25,14 @@ func TestWorkflowsSimple(t *testing.T) {
 	}}
 
 	engine := &Engine{}
-	matched := engine.executeWorkflow(&contextargs.MetaInput{Input: "https://test.com"}, workflow)
+	input := contextargs.NewWithInput("https://test.com")
+	ctx := scan.NewScanContext(input)
+	matched := engine.executeWorkflow(ctx, workflow)
 	require.True(t, matched, "could not get correct match value")
 }
 
 func TestWorkflowsSimpleMultiple(t *testing.T) {
-	progressBar, _ := progress.NewStatsTicker(0, false, false, false, false, 0)
+	progressBar, _ := progress.NewStatsTicker(0, false, false, false, 0)
 
 	var firstInput, secondInput string
 	workflow := &workflows.Workflow{Options: &protocols.ExecutorOptions{Options: &types.Options{TemplateThreads: 10}}, Workflows: []*workflows.WorkflowTemplate{
@@ -46,7 +49,9 @@ func TestWorkflowsSimpleMultiple(t *testing.T) {
 	}}
 
 	engine := &Engine{}
-	matched := engine.executeWorkflow(&contextargs.MetaInput{Input: "https://test.com"}, workflow)
+	input := contextargs.NewWithInput("https://test.com")
+	ctx := scan.NewScanContext(input)
+	matched := engine.executeWorkflow(ctx, workflow)
 	require.True(t, matched, "could not get correct match value")
 
 	require.Equal(t, "https://test.com", firstInput, "could not get correct first input")
@@ -54,7 +59,7 @@ func TestWorkflowsSimpleMultiple(t *testing.T) {
 }
 
 func TestWorkflowsSubtemplates(t *testing.T) {
-	progressBar, _ := progress.NewStatsTicker(0, false, false, false, false, 0)
+	progressBar, _ := progress.NewStatsTicker(0, false, false, false, 0)
 
 	var firstInput, secondInput string
 	workflow := &workflows.Workflow{Options: &protocols.ExecutorOptions{Options: &types.Options{TemplateThreads: 10}}, Workflows: []*workflows.WorkflowTemplate{
@@ -72,7 +77,9 @@ func TestWorkflowsSubtemplates(t *testing.T) {
 	}}
 
 	engine := &Engine{}
-	matched := engine.executeWorkflow(&contextargs.MetaInput{Input: "https://test.com"}, workflow)
+	input := contextargs.NewWithInput("https://test.com")
+	ctx := scan.NewScanContext(input)
+	matched := engine.executeWorkflow(ctx, workflow)
 	require.True(t, matched, "could not get correct match value")
 
 	require.Equal(t, "https://test.com", firstInput, "could not get correct first input")
@@ -80,7 +87,7 @@ func TestWorkflowsSubtemplates(t *testing.T) {
 }
 
 func TestWorkflowsSubtemplatesNoMatch(t *testing.T) {
-	progressBar, _ := progress.NewStatsTicker(0, false, false, false, false, 0)
+	progressBar, _ := progress.NewStatsTicker(0, false, false, false, 0)
 
 	var firstInput, secondInput string
 	workflow := &workflows.Workflow{Options: &protocols.ExecutorOptions{Options: &types.Options{TemplateThreads: 10}}, Workflows: []*workflows.WorkflowTemplate{
@@ -96,7 +103,9 @@ func TestWorkflowsSubtemplatesNoMatch(t *testing.T) {
 	}}
 
 	engine := &Engine{}
-	matched := engine.executeWorkflow(&contextargs.MetaInput{Input: "https://test.com"}, workflow)
+	input := contextargs.NewWithInput("https://test.com")
+	ctx := scan.NewScanContext(input)
+	matched := engine.executeWorkflow(ctx, workflow)
 	require.False(t, matched, "could not get correct match value")
 
 	require.Equal(t, "https://test.com", firstInput, "could not get correct first input")
@@ -104,7 +113,7 @@ func TestWorkflowsSubtemplatesNoMatch(t *testing.T) {
 }
 
 func TestWorkflowsSubtemplatesWithMatcher(t *testing.T) {
-	progressBar, _ := progress.NewStatsTicker(0, false, false, false, false, 0)
+	progressBar, _ := progress.NewStatsTicker(0, false, false, false, 0)
 
 	var firstInput, secondInput string
 	workflow := &workflows.Workflow{Options: &protocols.ExecutorOptions{Options: &types.Options{TemplateThreads: 10}}, Workflows: []*workflows.WorkflowTemplate{
@@ -125,7 +134,9 @@ func TestWorkflowsSubtemplatesWithMatcher(t *testing.T) {
 	}}
 
 	engine := &Engine{}
-	matched := engine.executeWorkflow(&contextargs.MetaInput{Input: "https://test.com"}, workflow)
+	input := contextargs.NewWithInput("https://test.com")
+	ctx := scan.NewScanContext(input)
+	matched := engine.executeWorkflow(ctx, workflow)
 	require.True(t, matched, "could not get correct match value")
 
 	require.Equal(t, "https://test.com", firstInput, "could not get correct first input")
@@ -133,7 +144,7 @@ func TestWorkflowsSubtemplatesWithMatcher(t *testing.T) {
 }
 
 func TestWorkflowsSubtemplatesWithMatcherNoMatch(t *testing.T) {
-	progressBar, _ := progress.NewStatsTicker(0, false, false, false, false, 0)
+	progressBar, _ := progress.NewStatsTicker(0, false, false, false, 0)
 
 	var firstInput, secondInput string
 	workflow := &workflows.Workflow{Options: &protocols.ExecutorOptions{Options: &types.Options{TemplateThreads: 10}}, Workflows: []*workflows.WorkflowTemplate{
@@ -154,7 +165,9 @@ func TestWorkflowsSubtemplatesWithMatcherNoMatch(t *testing.T) {
 	}}
 
 	engine := &Engine{}
-	matched := engine.executeWorkflow(&contextargs.MetaInput{Input: "https://test.com"}, workflow)
+	input := contextargs.NewWithInput("https://test.com")
+	ctx := scan.NewScanContext(input)
+	matched := engine.executeWorkflow(ctx, workflow)
 	require.False(t, matched, "could not get correct match value")
 
 	require.Equal(t, "https://test.com", firstInput, "could not get correct first input")
@@ -178,20 +191,20 @@ func (m *mockExecuter) Requests() int {
 }
 
 // Execute executes the protocol group and  returns true or false if results were found.
-func (m *mockExecuter) Execute(input *contextargs.Context) (bool, error) {
+func (m *mockExecuter) Execute(ctx *scan.ScanContext) (bool, error) {
 	if m.executeHook != nil {
-		m.executeHook(input.MetaInput)
+		m.executeHook(ctx.Input.MetaInput)
 	}
 	return m.result, nil
 }
 
 // ExecuteWithResults executes the protocol requests and returns results instead of writing them.
-func (m *mockExecuter) ExecuteWithResults(input *contextargs.Context, callback protocols.OutputEventCallback) error {
+func (m *mockExecuter) ExecuteWithResults(ctx *scan.ScanContext) ([]*output.ResultEvent, error) {
 	if m.executeHook != nil {
-		m.executeHook(input.MetaInput)
+		m.executeHook(ctx.Input.MetaInput)
 	}
 	for _, output := range m.outputs {
-		callback(output)
+		ctx.LogEvent(output)
 	}
-	return nil
+	return ctx.GenerateResult(), nil
 }

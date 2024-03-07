@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"net/http/httputil"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +19,6 @@ import (
 
 	"github.com/projectdiscovery/retryablehttp-go"
 	errorutil "github.com/projectdiscovery/utils/errors"
-	fileutil "github.com/projectdiscovery/utils/file"
 	logutil "github.com/projectdiscovery/utils/log"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
@@ -29,57 +28,58 @@ import (
 var httpTestcases = []TestCaseInfo{
 	// TODO: excluded due to parsing errors with console
 	// "http/raw-unsafe-request.yaml":                  &httpRawUnsafeRequest{},
-	{Path: "http/get-headers.yaml", TestCase: &httpGetHeaders{}},
-	{Path: "http/get-query-string.yaml", TestCase: &httpGetQueryString{}},
-	{Path: "http/get-redirects.yaml", TestCase: &httpGetRedirects{}},
-	{Path: "http/get-host-redirects.yaml", TestCase: &httpGetHostRedirects{}},
-	{Path: "http/disable-redirects.yaml", TestCase: &httpDisableRedirects{}},
-	{Path: "http/get.yaml", TestCase: &httpGet{}},
-	{Path: "http/post-body.yaml", TestCase: &httpPostBody{}},
-	{Path: "http/post-json-body.yaml", TestCase: &httpPostJSONBody{}},
-	{Path: "http/post-multipart-body.yaml", TestCase: &httpPostMultipartBody{}},
-	{Path: "http/raw-cookie-reuse.yaml", TestCase: &httpRawCookieReuse{}},
-	{Path: "http/raw-dynamic-extractor.yaml", TestCase: &httpRawDynamicExtractor{}},
-	{Path: "http/raw-get-query.yaml", TestCase: &httpRawGetQuery{}},
-	{Path: "http/raw-get.yaml", TestCase: &httpRawGet{}},
-	{Path: "http/raw-with-params.yaml", TestCase: &httpRawWithParams{}},
-	{Path: "http/raw-unsafe-with-params.yaml", TestCase: &httpRawWithParams{}}, // Not a typo, functionality is same as above
-	{Path: "http/raw-path-trailing-slash.yaml", TestCase: &httpRawPathTrailingSlash{}},
-	{Path: "http/raw-payload.yaml", TestCase: &httpRawPayload{}},
-	{Path: "http/raw-post-body.yaml", TestCase: &httpRawPostBody{}},
-	{Path: "http/raw-unsafe-path.yaml", TestCase: &httpRawUnsafePath{}},
-	{Path: "http/http-paths.yaml", TestCase: &httpPaths{}},
-	{Path: "http/request-condition.yaml", TestCase: &httpRequestCondition{}},
-	{Path: "http/request-condition-new.yaml", TestCase: &httpRequestCondition{}},
-	{Path: "http/self-contained.yaml", TestCase: &httpRequestSelfContained{}},
-	{Path: "http/self-contained-with-path.yaml", TestCase: &httpRequestSelfContained{}}, // Not a typo, functionality is same as above
-	{Path: "http/self-contained-with-params.yaml", TestCase: &httpRequestSelfContainedWithParams{}},
-	{Path: "http/self-contained-file-input.yaml", TestCase: &httpRequestSelfContainedFileInput{}},
-	{Path: "http/get-case-insensitive.yaml", TestCase: &httpGetCaseInsensitive{}},
-	{Path: "http/get.yaml,http/get-case-insensitive.yaml", TestCase: &httpGetCaseInsensitiveCluster{}},
-	{Path: "http/get-redirects-chain-headers.yaml", TestCase: &httpGetRedirectsChainHeaders{}},
-	{Path: "http/dsl-matcher-variable.yaml", TestCase: &httpDSLVariable{}},
-	{Path: "http/dsl-functions.yaml", TestCase: &httpDSLFunctions{}},
-	{Path: "http/race-simple.yaml", TestCase: &httpRaceSimple{}},
-	{Path: "http/race-multiple.yaml", TestCase: &httpRaceMultiple{}},
-	{Path: "http/stop-at-first-match.yaml", TestCase: &httpStopAtFirstMatch{}},
-	{Path: "http/stop-at-first-match-with-extractors.yaml", TestCase: &httpStopAtFirstMatchWithExtractors{}},
-	{Path: "http/variables.yaml", TestCase: &httpVariables{}},
-	{Path: "http/variable-dsl-function.yaml", TestCase: &httpVariableDSLFunction{}},
-	{Path: "http/get-override-sni.yaml", TestCase: &httpSniAnnotation{}},
-	{Path: "http/get-sni.yaml", TestCase: &customCLISNI{}},
-	{Path: "http/redirect-match-url.yaml", TestCase: &httpRedirectMatchURL{}},
-	{Path: "http/get-sni-unsafe.yaml", TestCase: &customCLISNIUnsafe{}},
-	{Path: "http/annotation-timeout.yaml", TestCase: &annotationTimeout{}},
-	{Path: "http/custom-attack-type.yaml", TestCase: &customAttackType{}},
-	{Path: "http/get-all-ips.yaml", TestCase: &scanAllIPS{}},
-	{Path: "http/get-without-scheme.yaml", TestCase: &httpGetWithoutScheme{}},
-	{Path: "http/cl-body-without-header.yaml", TestCase: &httpCLBodyWithoutHeader{}},
-	{Path: "http/cl-body-with-header.yaml", TestCase: &httpCLBodyWithHeader{}},
-	{Path: "http/save-extractor-values-to-file.yaml", TestCase: &httpSaveExtractorValuesToFile{}},
-	{Path: "http/cli-with-constants.yaml", TestCase: &ConstantWithCliVar{}},
-	{Path: "http/matcher-status.yaml", TestCase: &matcherStatusTest{}},
-	{Path: "http/disable-path-automerge.yaml", TestCase: &httpDisablePathAutomerge{}},
+	{Path: "protocols/http/get-headers.yaml", TestCase: &httpGetHeaders{}},
+	{Path: "protocols/http/get-query-string.yaml", TestCase: &httpGetQueryString{}},
+	{Path: "protocols/http/get-redirects.yaml", TestCase: &httpGetRedirects{}},
+	{Path: "protocols/http/get-host-redirects.yaml", TestCase: &httpGetHostRedirects{}},
+	{Path: "protocols/http/disable-redirects.yaml", TestCase: &httpDisableRedirects{}},
+	{Path: "protocols/http/get.yaml", TestCase: &httpGet{}},
+	{Path: "protocols/http/post-body.yaml", TestCase: &httpPostBody{}},
+	{Path: "protocols/http/post-json-body.yaml", TestCase: &httpPostJSONBody{}},
+	{Path: "protocols/http/post-multipart-body.yaml", TestCase: &httpPostMultipartBody{}},
+	{Path: "protocols/http/raw-cookie-reuse.yaml", TestCase: &httpRawCookieReuse{}},
+	{Path: "protocols/http/raw-dynamic-extractor.yaml", TestCase: &httpRawDynamicExtractor{}},
+	{Path: "protocols/http/raw-get-query.yaml", TestCase: &httpRawGetQuery{}},
+	{Path: "protocols/http/raw-get.yaml", TestCase: &httpRawGet{}},
+	{Path: "protocols/http/raw-with-params.yaml", TestCase: &httpRawWithParams{}},
+	{Path: "protocols/http/raw-unsafe-with-params.yaml", TestCase: &httpRawWithParams{}}, // Not a typo, functionality is same as above
+	{Path: "protocols/http/raw-path-trailing-slash.yaml", TestCase: &httpRawPathTrailingSlash{}},
+	{Path: "protocols/http/raw-payload.yaml", TestCase: &httpRawPayload{}},
+	{Path: "protocols/http/raw-post-body.yaml", TestCase: &httpRawPostBody{}},
+	{Path: "protocols/http/raw-unsafe-path.yaml", TestCase: &httpRawUnsafePath{}},
+	{Path: "protocols/http/http-paths.yaml", TestCase: &httpPaths{}},
+	{Path: "protocols/http/request-condition.yaml", TestCase: &httpRequestCondition{}},
+	{Path: "protocols/http/request-condition-new.yaml", TestCase: &httpRequestCondition{}},
+	{Path: "protocols/http/self-contained.yaml", TestCase: &httpRequestSelfContained{}},
+	{Path: "protocols/http/self-contained-with-path.yaml", TestCase: &httpRequestSelfContained{}}, // Not a typo, functionality is same as above
+	{Path: "protocols/http/self-contained-with-params.yaml", TestCase: &httpRequestSelfContainedWithParams{}},
+	{Path: "protocols/http/self-contained-file-input.yaml", TestCase: &httpRequestSelfContainedFileInput{}},
+	{Path: "protocols/http/get-case-insensitive.yaml", TestCase: &httpGetCaseInsensitive{}},
+	{Path: "protocols/http/get.yaml,protocols/http/get-case-insensitive.yaml", TestCase: &httpGetCaseInsensitiveCluster{}},
+	{Path: "protocols/http/get-redirects-chain-headers.yaml", TestCase: &httpGetRedirectsChainHeaders{}},
+	{Path: "protocols/http/dsl-matcher-variable.yaml", TestCase: &httpDSLVariable{}},
+	{Path: "protocols/http/dsl-functions.yaml", TestCase: &httpDSLFunctions{}},
+	{Path: "protocols/http/race-simple.yaml", TestCase: &httpRaceSimple{}},
+	{Path: "protocols/http/race-multiple.yaml", TestCase: &httpRaceMultiple{}},
+	{Path: "protocols/http/stop-at-first-match.yaml", TestCase: &httpStopAtFirstMatch{}},
+	{Path: "protocols/http/stop-at-first-match-with-extractors.yaml", TestCase: &httpStopAtFirstMatchWithExtractors{}},
+	{Path: "protocols/http/variables.yaml", TestCase: &httpVariables{}},
+	{Path: "protocols/http/variable-dsl-function.yaml", TestCase: &httpVariableDSLFunction{}},
+	{Path: "protocols/http/get-override-sni.yaml", TestCase: &httpSniAnnotation{}},
+	{Path: "protocols/http/get-sni.yaml", TestCase: &customCLISNI{}},
+	{Path: "protocols/http/redirect-match-url.yaml", TestCase: &httpRedirectMatchURL{}},
+	{Path: "protocols/http/get-sni-unsafe.yaml", TestCase: &customCLISNIUnsafe{}},
+	{Path: "protocols/http/annotation-timeout.yaml", TestCase: &annotationTimeout{}},
+	{Path: "protocols/http/custom-attack-type.yaml", TestCase: &customAttackType{}},
+	{Path: "protocols/http/get-all-ips.yaml", TestCase: &scanAllIPS{}},
+	{Path: "protocols/http/get-without-scheme.yaml", TestCase: &httpGetWithoutScheme{}},
+	{Path: "protocols/http/cl-body-without-header.yaml", TestCase: &httpCLBodyWithoutHeader{}},
+	{Path: "protocols/http/cl-body-with-header.yaml", TestCase: &httpCLBodyWithHeader{}},
+	{Path: "protocols/http/cli-with-constants.yaml", TestCase: &ConstantWithCliVar{}},
+	{Path: "protocols/http/matcher-status.yaml", TestCase: &matcherStatusTest{}},
+	{Path: "protocols/http/disable-path-automerge.yaml", TestCase: &httpDisablePathAutomerge{}},
+	{Path: "protocols/http/http-preprocessor.yaml", TestCase: &httpPreprocessor{}},
+	{Path: "protocols/http/multi-request.yaml", TestCase: &httpMultiRequest{}},
 }
 
 type httpInteractshRequest struct{}
@@ -172,7 +172,7 @@ func (h *httpInteractshStopAtFirstMatchRequest) Execute(filePath string) error {
 	if err != nil {
 		return err
 	}
-	// polling is asyncronous, so the interactions may be retrieved after the first request
+	// polling is asynchronous, so the interactions may be retrieved after the first request
 	return expectResultsCount(results, 1)
 }
 
@@ -368,6 +368,7 @@ func (h *httpDSLFunctions) Execute(filePath string) error {
 	}
 
 	for _, header := range extracted {
+		header = strings.Trim(header, `"`)
 		parts := strings.Split(header, ": ")
 		index, err := strconv.Atoi(parts[0])
 		if err != nil {
@@ -834,7 +835,7 @@ func (h *httpRawCookieReuse) Execute(filePath string) error {
 //
 // 	ts := testutils.NewTCPServer(nil, defaultStaticPort, func(conn net.Conn) {
 // 		defer conn.Close()
-// 		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 36\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nThis is test raw-unsafe-matcher test"))
+// 		_, _ = conn.Write([]byte("protocols/http/1.1 200 OK\r\nContent-Length: 36\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nThis is test raw-unsafe-matcher test"))
 // 	})
 // 	defer ts.Close()
 //
@@ -1379,34 +1380,6 @@ func (h *httpCLBodyWithHeader) Execute(filePath string) error {
 	return expectResultsCount(got, 1)
 }
 
-type httpSaveExtractorValuesToFile struct{}
-
-func (h *httpSaveExtractorValuesToFile) Execute(filePath string) error {
-	router := httprouter.New()
-	router.GET("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		var buff bytes.Buffer
-		for i := 0; i < 10; i++ {
-			buff.WriteString(fmt.Sprintf(`"value": %v`+"\n", i))
-		}
-		_, _ = w.Write(buff.Bytes())
-	})
-	ts := httptest.NewServer(router)
-	defer ts.Close()
-
-	results, err := testutils.RunNucleiTemplateAndGetResults(filePath, ts.URL, debug)
-	if err != nil {
-		return err
-	}
-
-	// remove output.txt file if exists
-	if !fileutil.FileExists("output.txt") {
-		return fmt.Errorf("extractor output file output.txt file does not exist")
-	} else {
-		_ = os.Remove("output.txt")
-	}
-	return expectResultsCount(results, 1)
-}
-
 // constant shouldn't be overwritten by cli var with same name
 type ConstantWithCliVar struct{}
 
@@ -1453,11 +1426,78 @@ func (h *httpDisablePathAutomerge) Execute(filePath string) error {
 	router.GET("/api/v1/test", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		fmt.Fprint(w, r.URL.Query().Get("id"))
 	})
+	router.GET("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		fmt.Fprint(w, "empty path in raw request")
+	})
+
 	ts := httptest.NewServer(router)
 	defer ts.Close()
 	got, err := testutils.RunNucleiTemplateAndGetResults(filePath, ts.URL+"/api/v1/user", debug)
 	if err != nil {
 		return err
 	}
+	return expectResultsCount(got, 2)
+}
+
+type httpInteractshRequestsWithMCAnd struct{}
+
+func (h *httpInteractshRequestsWithMCAnd) Execute(filePath string) error {
+	got, err := testutils.RunNucleiTemplateAndGetResults(filePath, "honey.scanme.sh", debug)
+	if err != nil {
+		return err
+	}
 	return expectResultsCount(got, 1)
+}
+
+// integration test to check if preprocessor i.e {{randstr}}
+// is working correctly
+type httpPreprocessor struct{}
+
+// Execute executes a test case and returns an error if occurred
+func (h *httpPreprocessor) Execute(filePath string) error {
+	router := httprouter.New()
+	re := regexp.MustCompile(`[A-Za-z0-9]{25,}`)
+	router.GET("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		value := r.URL.RequestURI()
+		if re.MatchString(value) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, "ok")
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, "not ok")
+		}
+	})
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	results, err := testutils.RunNucleiTemplateAndGetResults(filePath, ts.URL, debug)
+	if err != nil {
+		return err
+	}
+
+	return expectResultsCount(results, 1)
+}
+
+type httpMultiRequest struct{}
+
+// Execute executes a test case and returns an error if occurred
+func (h *httpMultiRequest) Execute(filePath string) error {
+	router := httprouter.New()
+	router.GET("/ping", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ping")
+	})
+	router.GET("/pong", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "pong")
+	})
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	results, err := testutils.RunNucleiTemplateAndGetResults(filePath, ts.URL, debug)
+	if err != nil {
+		return err
+	}
+
+	return expectResultsCount(results, 1)
 }

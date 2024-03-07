@@ -1,9 +1,11 @@
+// Package runner executes the enumeration process.
 package runner
 
 import (
 	"fmt"
 
 	"github.com/projectdiscovery/gologger"
+	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
 	updateutils "github.com/projectdiscovery/utils/update"
 	"github.com/wen0750/nucleiinjson/pkg/catalog/config"
 )
@@ -25,5 +27,11 @@ func showBanner() {
 // NucleiToolUpdateCallback updates nuclei binary/tool to latest version
 func NucleiToolUpdateCallback() {
 	showBanner()
-	updateutils.GetUpdateToolCallback("nuclei", config.Version)()
+	updateutils.GetUpdateToolCallback(config.BinaryName, config.Version)()
+}
+
+// AuthWithPDCP is used to authenticate with PDCP
+func AuthWithPDCP() {
+	showBanner()
+	pdcpauth.CheckNValidateCredentials(config.BinaryName)
 }

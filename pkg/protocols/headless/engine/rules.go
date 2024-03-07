@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/wen0750/nucleiinjson/pkg/protocols/common/protocolstate"
 )
 
 // routingRuleHandler handles proxy rule for actions related to request/response modification
@@ -36,7 +37,7 @@ func (p *Page) routingRuleHandler(ctx *rod.Hijack) {
 		}
 	}
 
-	if p.options.CookieReuse {
+	if !p.options.DisableCookie {
 		// each http request is performed via the native go http client
 		// we first inject the shared cookies
 		if cookies := p.input.CookieJar.Cookies(ctx.Request.URL()); len(cookies) > 0 {
@@ -47,7 +48,7 @@ func (p *Page) routingRuleHandler(ctx *rod.Hijack) {
 	// perform the request
 	_ = ctx.LoadResponse(p.instance.browser.httpclient, true)
 
-	if p.options.CookieReuse {
+	if !p.options.DisableCookie {
 		// retrieve the updated cookies from the native http client and inject them into the shared cookie jar
 		// keeps existing one if not present
 		if cookies := p.instance.browser.httpclient.Jar.Cookies(ctx.Request.URL()); len(cookies) > 0 {
@@ -103,6 +104,12 @@ func (p *Page) routingRuleHandler(ctx *rod.Hijack) {
 
 // routingRuleHandlerNative handles native proxy rule
 func (p *Page) routingRuleHandlerNative(e *proto.FetchRequestPaused) error {
+	// ValidateNFailRequest validates if Local file access is enabled
+	// and local network access is enables if not it will fail the request
+	// that don't match the rules
+	if err := protocolstate.ValidateNFailRequest(p.page, e); err != nil {
+		return err
+	}
 	body, _ := FetchGetResponseBody(p.page, e)
 	headers := make(map[string][]string)
 	for _, h := range e.ResponseHeaders {

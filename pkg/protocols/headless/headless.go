@@ -1,9 +1,9 @@
 package headless
 
 import (
-	"github.com/corpix/uarand"
 	"github.com/pkg/errors"
 
+	uagent "github.com/projectdiscovery/useragent"
 	fileutil "github.com/projectdiscovery/utils/file"
 	useragent "github.com/wen0750/nucleiinjson/pkg/model/types/userAgent"
 	"github.com/wen0750/nucleiinjson/pkg/operators"
@@ -60,8 +60,17 @@ type Request struct {
 	Fuzzing []*fuzz.Rule `yaml:"fuzzing,omitempty" json:"fuzzing,omitempty" jsonschema:"title=fuzzin rules for http fuzzing,description=Fuzzing describes rule schema to fuzz headless requests"`
 
 	// description: |
+	//   SelfContained specifies if the request is self-contained.
+	SelfContained bool `yaml:"-" json:"-"`
+
+	// description: |
 	//   CookieReuse is an optional setting that enables cookie reuse
+	// Deprecated: This is default now. Use disable-cookie to disable cookie reuse. cookie-reuse will be removed in future releases.
 	CookieReuse bool `yaml:"cookie-reuse,omitempty" json:"cookie-reuse,omitempty" jsonschema:"title=optional cookie reuse enable,description=Optional setting that enables cookie reuse"`
+
+	// description: |
+	//   DisableCookie is an optional setting that disables cookie reuse
+	DisableCookie bool `yaml:"disable-cookie,omitempty" json:"disable-cookie,omitempty" jsonschema:"title=optional disable cookie reuse,description=Optional setting that disables cookie reuse"`
 }
 
 // RequestPartDefinitions contains a mapping of request part definitions and their
@@ -91,6 +100,8 @@ func (request *Request) GetID() string {
 
 // Compile compiles the protocol request for further execution.
 func (request *Request) Compile(options *protocols.ExecutorOptions) error {
+	request.options = options
+
 	// TODO: logic similar to network + http => probably can be refactored
 	// Resolve payload paths from vars if they exists
 	for name, payload := range options.Options.Vars.AsMap() {
@@ -106,7 +117,7 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 
 	if len(request.Payloads) > 0 {
 		var err error
-		request.generator, err = generators.New(request.Payloads, request.AttackType.Value, options.TemplatePath, options.Options.AllowLocalFileAccess, options.Catalog, options.Options.AttackType)
+		request.generator, err = generators.New(request.Payloads, request.AttackType.Value, options.TemplatePath, options.Catalog, options.Options.AttackType, request.options.Options)
 		if err != nil {
 			return errors.Wrap(err, "could not parse payloads")
 		}
@@ -124,7 +135,8 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 		}
 		request.compiledUserAgent = request.CustomUserAgent
 	case useragent.Random:
-		request.compiledUserAgent = uarand.GetRandom()
+		userAgent := uagent.PickRandom()
+		request.compiledUserAgent = userAgent.Raw
 	}
 
 	if len(request.Matchers) > 0 || len(request.Extractors) > 0 {
@@ -136,7 +148,6 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 		}
 		request.CompiledOperators = compiled
 	}
-	request.options = options
 
 	if len(request.Fuzzing) > 0 {
 		for _, rule := range request.Fuzzing {

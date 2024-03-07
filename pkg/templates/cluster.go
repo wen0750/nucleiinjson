@@ -7,12 +7,13 @@ import (
 
 	"github.com/projectdiscovery/gologger"
 	cryptoutil "github.com/projectdiscovery/utils/crypto"
+	mapsutil "github.com/projectdiscovery/utils/maps"
 	"github.com/wen0750/nucleiinjson/pkg/model"
 	"github.com/wen0750/nucleiinjson/pkg/operators"
 	"github.com/wen0750/nucleiinjson/pkg/output"
 	"github.com/wen0750/nucleiinjson/pkg/protocols"
-	"github.com/wen0750/nucleiinjson/pkg/protocols/common/contextargs"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/helpers/writer"
+	"github.com/wen0750/nucleiinjson/pkg/scan"
 	"github.com/wen0750/nucleiinjson/pkg/templates/types"
 )
 
@@ -29,9 +30,9 @@ import (
 // to the first individual request is compared for equality.
 // The equality check is performed as described below -
 //
-// Cases where clustering is not perfomed (request is considered different)
+// Cases where clustering is not performed (request is considered different)
 //   - If request contains payloads,raw,body,unsafe,req-condition,name attributes
-//   - If request methods,max-redirects,cookie-reuse,redirects are not equal
+//   - If request methods,max-redirects,disable-cookie,redirects are not equal
 //   - If request paths aren't identical.
 //   - If request headers aren't identical
 //   - Similarly for DNS, only identical DNS requests are clustered to a target.
@@ -40,19 +41,25 @@ import (
 // If multiple requests are identified as identical, they are appended to a slice.
 // Finally, the engine creates a single executer with a clusteredexecuter for all templates
 // in a cluster.
-func Cluster(list map[string]*Template) [][]*Template {
+func Cluster(list []*Template) [][]*Template {
 	final := [][]*Template{}
+	skip := mapsutil.NewSyncLockMap[string, struct{}]()
 
-	// Each protocol that can be clustered should be handled here.
-	for key, template := range list {
-		// We only cluster http and dns requests as of now.
+	for _, template := range list {
+		key := template.Path
+
+		if skip.Has(key) {
+			continue
+		}
+
+		// We only cluster http, dns and ssl requests as of now.
 		// Take care of requests that can't be clustered first.
 		if len(template.RequestsHTTP) == 0 && len(template.RequestsDNS) == 0 && len(template.RequestsSSL) == 0 {
-			delete(list, key)
+			_ = skip.Set(key, struct{}{})
 			final = append(final, []*Template{template})
 			continue
 		}
-		delete(list, key) // delete element first so it's not found later.
+		_ = skip.Set(key, struct{}{})
 
 		var templateType types.ProtocolType
 		switch {
@@ -67,27 +74,33 @@ func Cluster(list map[string]*Template) [][]*Template {
 		// Find any/all similar matching request that is identical to
 		// this one and cluster them together for http protocol only.
 		cluster := []*Template{}
-		for otherKey, other := range list {
+		for _, other := range list {
+			otherKey := other.Path
+
+			if skip.Has(otherKey) {
+				continue
+			}
+
 			switch templateType {
 			case types.DNSProtocol:
-				if len(other.RequestsDNS) == 0 || len(other.RequestsDNS) > 1 {
+				if len(other.RequestsDNS) != 1 {
 					continue
 				} else if template.RequestsDNS[0].CanCluster(other.RequestsDNS[0]) {
-					delete(list, otherKey)
+					_ = skip.Set(otherKey, struct{}{})
 					cluster = append(cluster, other)
 				}
 			case types.HTTPProtocol:
-				if len(other.RequestsHTTP) == 0 || len(other.RequestsHTTP) > 1 {
+				if len(other.RequestsHTTP) != 1 {
 					continue
 				} else if template.RequestsHTTP[0].CanCluster(other.RequestsHTTP[0]) {
-					delete(list, otherKey)
+					_ = skip.Set(otherKey, struct{}{})
 					cluster = append(cluster, other)
 				}
 			case types.SSLProtocol:
-				if len(other.RequestsSSL) == 0 || len(other.RequestsSSL) > 1 {
+				if len(other.RequestsSSL) != 1 {
 					continue
 				} else if template.RequestsSSL[0].CanCluster(other.RequestsSSL[0]) {
-					delete(list, otherKey)
+					_ = skip.Set(otherKey, struct{}{})
 					cluster = append(cluster, other)
 				}
 			}
@@ -95,9 +108,9 @@ func Cluster(list map[string]*Template) [][]*Template {
 		if len(cluster) > 0 {
 			cluster = append(cluster, template)
 			final = append(final, cluster)
-			continue
+		} else {
+			final = append(final, []*Template{template})
 		}
-		final = append(final, []*Template{template})
 	}
 	return final
 }
@@ -118,14 +131,10 @@ func ClusterTemplates(templatesList []*Template, options protocols.ExecutorOptio
 		return templatesList, 0
 	}
 
-	templatesMap := make(map[string]*Template)
-	for _, v := range templatesList {
-		templatesMap[v.Path] = v
-	}
-	clusterCount := 0
+	var clusterCount int
 
 	finalTemplatesList := make([]*Template, 0, len(templatesList))
-	clusters := Cluster(templatesMap)
+	clusters := Cluster(templatesList)
 	for _, cluster := range clusters {
 		if len(cluster) > 1 {
 			executerOpts := options
@@ -231,12 +240,12 @@ func (e *ClusterExecuter) Requests() int {
 }
 
 // Execute executes the protocol group and returns true or false if results were found.
-func (e *ClusterExecuter) Execute(input *contextargs.Context) (bool, error) {
+func (e *ClusterExecuter) Execute(ctx *scan.ScanContext) (bool, error) {
 	var results bool
 
-	inputItem := input.Clone()
-	if e.options.InputHelper != nil && input.MetaInput.Input != "" {
-		if inputItem.MetaInput.Input = e.options.InputHelper.Transform(input.MetaInput.Input, e.templateType); input.MetaInput.Input == "" {
+	inputItem := ctx.Input.Clone()
+	if e.options.InputHelper != nil && ctx.Input.MetaInput.Input != "" {
+		if inputItem.MetaInput.Input = e.options.InputHelper.Transform(ctx.Input.MetaInput.Input, e.templateType); ctx.Input.MetaInput.Input == "" {
 			return false, nil
 		}
 	}
@@ -249,8 +258,8 @@ func (e *ClusterExecuter) Execute(input *contextargs.Context) (bool, error) {
 			event.InternalEvent["template-path"] = operator.templatePath
 			event.InternalEvent["template-info"] = operator.templateInfo
 
-			if result == nil && !matched {
-				if err := e.options.Output.WriteFailure(event.InternalEvent); err != nil {
+			if result == nil && !matched && e.options.Options.MatcherStatus {
+				if err := e.options.Output.WriteFailure(event); err != nil {
 					gologger.Warning().Msgf("Could not write failure event to output: %s\n", err)
 				}
 				continue
@@ -265,19 +274,20 @@ func (e *ClusterExecuter) Execute(input *contextargs.Context) (bool, error) {
 		}
 	})
 	if err != nil && e.options.HostErrorsCache != nil {
-		e.options.HostErrorsCache.MarkFailed(input.MetaInput.Input, err)
+		e.options.HostErrorsCache.MarkFailed(ctx.Input.MetaInput.Input, err)
 	}
 	return results, err
 }
 
 // ExecuteWithResults executes the protocol requests and returns results instead of writing them.
-func (e *ClusterExecuter) ExecuteWithResults(input *contextargs.Context, callback protocols.OutputEventCallback) error {
+func (e *ClusterExecuter) ExecuteWithResults(ctx *scan.ScanContext) ([]*output.ResultEvent, error) {
+	scanCtx := scan.NewScanContext(ctx.Input)
 	dynamicValues := make(map[string]interface{})
 
-	inputItem := input.Clone()
-	if e.options.InputHelper != nil && input.MetaInput.Input != "" {
-		if inputItem.MetaInput.Input = e.options.InputHelper.Transform(input.MetaInput.Input, e.templateType); input.MetaInput.Input == "" {
-			return nil
+	inputItem := ctx.Input.Clone()
+	if e.options.InputHelper != nil && ctx.Input.MetaInput.Input != "" {
+		if inputItem.MetaInput.Input = e.options.InputHelper.Transform(ctx.Input.MetaInput.Input, e.templateType); ctx.Input.MetaInput.Input == "" {
+			return nil, nil
 		}
 	}
 	err := e.requests.ExecuteWithResults(inputItem, dynamicValues, nil, func(event *output.InternalWrappedEvent) {
@@ -289,12 +299,16 @@ func (e *ClusterExecuter) ExecuteWithResults(input *contextargs.Context, callbac
 				event.InternalEvent["template-path"] = operator.templatePath
 				event.InternalEvent["template-info"] = operator.templateInfo
 				event.Results = e.requests.MakeResultEvent(event)
-				callback(event)
+				scanCtx.LogEvent(event)
 			}
 		}
 	})
-	if err != nil && e.options.HostErrorsCache != nil {
-		e.options.HostErrorsCache.MarkFailed(input.MetaInput.Input, err)
+	if err != nil {
+		ctx.LogError(err)
 	}
-	return err
+
+	if err != nil && e.options.HostErrorsCache != nil {
+		e.options.HostErrorsCache.MarkFailed(ctx.Input.MetaInput.Input, err)
+	}
+	return scanCtx.GenerateResult(), err
 }

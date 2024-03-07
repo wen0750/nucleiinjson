@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	permissionutil "github.com/projectdiscovery/utils/permission"
 	"github.com/wen0750/nucleiinjson/pkg/model"
 	"github.com/wen0750/nucleiinjson/pkg/model/types/severity"
 	"github.com/wen0750/nucleiinjson/pkg/testutils"
@@ -44,7 +45,7 @@ func TestFindInputPaths(t *testing.T) {
 		"test.js":           "TEST",
 	}
 	for k, v := range files {
-		err = os.WriteFile(filepath.Join(tempDir, k), []byte(v), os.ModePerm)
+		err = os.WriteFile(filepath.Join(tempDir, k), []byte(v), permissionutil.TempFilePermission)
 		require.Nil(t, err, "could not write temporary file")
 	}
 	expected := []string{"config.yaml", "final.yaml", "test.js"}

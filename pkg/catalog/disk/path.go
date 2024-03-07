@@ -9,6 +9,7 @@ import (
 	"github.com/pkg/errors"
 	fileutil "github.com/projectdiscovery/utils/file"
 	urlutil "github.com/projectdiscovery/utils/url"
+	"github.com/wen0750/nucleiinjson/pkg/catalog/config"
 )
 
 // ResolvePath resolves the path to an absolute one in various ways.
@@ -37,12 +38,11 @@ func (c *DiskCatalog) ResolvePath(templateName, second string) (string, error) {
 		return potentialPath, nil
 	}
 
-	if c.templatesDirectory != "" {
-		templatePath := filepath.Join(c.templatesDirectory, templateName)
-		if potentialPath, err := c.tryResolve(templatePath); err != errNoValidCombination {
-			return potentialPath, nil
-		}
+	templatePath = filepath.Join(config.DefaultConfig.GetTemplateDir(), templateName)
+	if potentialPath, err := c.tryResolve(templatePath); err != errNoValidCombination {
+		return potentialPath, nil
 	}
+
 	return "", fmt.Errorf("no such path found: %s", templateName)
 }
 
@@ -50,7 +50,7 @@ var errNoValidCombination = errors.New("no valid combination found")
 
 // tryResolve attempts to load locate the target by iterating across all the folders tree
 func (c *DiskCatalog) tryResolve(fullPath string) (string, error) {
-	if _, err := os.Stat(fullPath); !os.IsNotExist(err) {
+	if fileutil.FileOrFolderExists(fullPath) {
 		return fullPath, nil
 	}
 	return "", errNoValidCombination
@@ -89,7 +89,7 @@ func BackwardsCompatiblePaths(templateDir string, oldPath string) string {
 		// trim the template directory from the path
 		return newPathCallback(tmp)
 	case strings.Contains(oldPath, urlutil.SchemeSeparator):
-		// scheme seperator is used to identify the path as url
+		// scheme separator is used to identify the path as url
 		// TBD: add support for url directories ??
 		return oldPath
 	case strings.Contains(oldPath, "*"):

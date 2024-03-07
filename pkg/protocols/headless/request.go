@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/projectdiscovery/retryablehttp-go"
+
 	"github.com/pkg/errors"
 	"golang.org/x/exp/maps"
 
@@ -37,13 +39,25 @@ func (request *Request) Type() templateTypes.ProtocolType {
 
 // ExecuteWithResults executes the protocol requests and returns results instead of writing them.
 func (request *Request) ExecuteWithResults(input *contextargs.Context, metadata, previous output.InternalEvent, callback protocols.OutputEventCallback) error {
+	if request.SelfContained {
+		url, err := extractBaseURLFromActions(request.Steps)
+		if err != nil {
+			return err
+		}
+		input = contextargs.NewWithInput(url)
+	}
+
 	if request.options.Browser.UserAgent() == "" {
 		request.options.Browser.SetUserAgent(request.compiledUserAgent)
 	}
 
 	vars := protocolutils.GenerateVariablesWithContextArgs(input, false)
 	payloads := generators.BuildPayloadFromOptions(request.options.Options)
+	// add templatecontext variables to varMap
 	values := generators.MergeMaps(vars, metadata, payloads)
+	if request.options.HasTemplateCtx(input.MetaInput) {
+		values = generators.MergeMaps(values, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	}
 	variablesMap := request.options.Variables.Evaluate(values)
 	payloads = generators.MergeMaps(variablesMap, payloads, request.options.Constants)
 
@@ -83,6 +97,21 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, metadata,
 	return nil
 }
 
+// This function extracts the base URL from actions.
+func extractBaseURLFromActions(steps []*engine.Action) (string, error) {
+	for _, action := range steps {
+		if action.ActionType.ActionType == engine.ActionNavigate {
+			navigateURL := action.GetArg("url")
+			url, err := urlutil.Parse(navigateURL)
+			if err != nil {
+				return "", errors.Errorf("could not parse URL '%s': %s", navigateURL, err.Error())
+			}
+			return fmt.Sprintf("%s://%s", url.Scheme, url.Host), nil
+		}
+	}
+	return "", errors.New("no navigation action found")
+}
+
 func (request *Request) executeRequestWithPayloads(input *contextargs.Context, payloads map[string]interface{}, previous output.InternalEvent, callback protocols.OutputEventCallback) error {
 	instance, err := request.options.Browser.NewInstance()
 	if err != nil {
@@ -93,7 +122,7 @@ func (request *Request) executeRequestWithPayloads(input *contextargs.Context, p
 	defer instance.Close()
 
 	if vardump.EnableVarDump {
-		gologger.Debug().Msgf("Protocol request variables: \n%s\n", vardump.DumpVariables(payloads))
+		gologger.Debug().Msgf("Headless Protocol request variables: \n%s\n", vardump.DumpVariables(payloads))
 	}
 
 	instance.SetInteractsh(request.options.Interactsh)
@@ -104,12 +133,13 @@ func (request *Request) executeRequestWithPayloads(input *contextargs.Context, p
 		return errors.Wrap(err, errCouldGetHtmlElement)
 	}
 	options := &engine.Options{
-		Timeout:     time.Duration(request.options.Options.PageTimeout) * time.Second,
-		CookieReuse: request.CookieReuse,
+		Timeout:       time.Duration(request.options.Options.PageTimeout) * time.Second,
+		DisableCookie: request.DisableCookie,
+		Options:       request.options.Options,
 	}
 
-	if options.CookieReuse && input.CookieJar == nil {
-		return errors.New("cookie-reuse set but cookie-jar is nil")
+	if !options.DisableCookie && input.CookieJar == nil {
+		return errors.New("cookie reuse enabled but cookie-jar is nil")
 	}
 
 	out, page, err := instance.Run(input, request.Steps, payloads, options)
@@ -154,6 +184,11 @@ func (request *Request) executeRequestWithPayloads(input *contextargs.Context, p
 	}
 
 	outputEvent := request.responseToDSLMap(responseBody, out["header"], out["status_code"], reqBuilder.String(), input.MetaInput.Input, navigatedURL, page.DumpHistory())
+	// add response fields to template context and merge templatectx variables to output event
+	request.options.AddTemplateVars(input.MetaInput, request.Type(), request.ID, outputEvent)
+	if request.options.HasTemplateCtx(input.MetaInput) {
+		outputEvent = generators.MergeMaps(outputEvent, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	}
 	for k, v := range out {
 		outputEvent[k] = v
 	}
@@ -210,12 +245,16 @@ func (request *Request) executeFuzzingRule(input *contextargs.Context, payloads 
 	if _, err := urlutil.Parse(input.MetaInput.Input); err != nil {
 		return errors.Wrap(err, "could not parse url")
 	}
+	baseRequest, err := retryablehttp.NewRequest("GET", input.MetaInput.Input, nil)
+	if err != nil {
+		return errors.Wrap(err, "could not create base request")
+	}
 	for _, rule := range request.Fuzzing {
 		err := rule.Execute(&fuzz.ExecuteRuleInput{
 			Input:       input,
 			Callback:    fuzzRequestCallback,
 			Values:      payloads,
-			BaseRequest: nil,
+			BaseRequest: baseRequest,
 		})
 		if err == types.ErrNoMoreRequests {
 			return nil
@@ -227,7 +266,7 @@ func (request *Request) executeFuzzingRule(input *contextargs.Context, payloads 
 	return nil
 }
 
-// getLastNaviationURL returns last successfully navigated URL
+// getLastNavigationURL returns last successfully navigated URL
 func (request *Request) getLastNavigationURLWithLog(reqLog map[string]string) string {
 	for i := len(request.Steps) - 1; i >= 0; i-- {
 		if request.Steps[i].ActionType.ActionType == engine.ActionNavigate {

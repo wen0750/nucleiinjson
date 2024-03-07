@@ -1,11 +1,13 @@
 package network
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
 
 	"github.com/projectdiscovery/fastdialer/fastdialer"
+	errorutil "github.com/projectdiscovery/utils/errors"
 	fileutil "github.com/projectdiscovery/utils/file"
 	"github.com/wen0750/nucleiinjson/pkg/operators"
 	"github.com/wen0750/nucleiinjson/pkg/protocols"
@@ -43,10 +45,27 @@ type Request struct {
 	//   of payloads is provided, or optionally a single file can also
 	//   be provided as payload which will be read on run-time.
 	Payloads map[string]interface{} `yaml:"payloads,omitempty" json:"payloads,omitempty" jsonschema:"title=payloads for the network request,description=Payloads contains any payloads for the current request"`
+	// description: |
+	//   Threads specifies number of threads to use sending requests. This enables Connection Pooling.
+	//
+	//   Connection: Close attribute must not be used in request while using threads flag, otherwise
+	//   pooling will fail and engine will continue to close connections after requests.
+	// examples:
+	//   - name: Send requests using 10 concurrent threads
+	//     value: 10
+	Threads int `yaml:"threads,omitempty" json:"threads,omitempty" jsonschema:"title=threads for sending requests,description=Threads specifies number of threads to use sending requests. This enables Connection Pooling"`
 
 	// description: |
 	//   Inputs contains inputs for the network socket
 	Inputs []*Input `yaml:"inputs,omitempty" json:"inputs,omitempty" jsonschema:"title=inputs for the network request,description=Inputs contains any input/output for the current request"`
+	// description: |
+	//   Port is the port to send network requests to. this acts as default port but is overriden if target/input contains
+	// non-http(s) ports like 80,8080,8081 etc
+	Port string `yaml:"port,omitempty" json:"port,omitempty" jsonschema:"title=port to send requests to,description=Port to send network requests to"`
+
+	// description:	|
+	//	ExcludePorts is the list of ports to exclude from being scanned . It is intended to be used with `Port` field and contains a list of ports which are ignored/skipped
+	ExcludePorts string `yaml:"exclude-ports,omitempty" json:"exclude-ports,omitempty" jsonschema:"title=exclude ports from being scanned,description=Exclude ports from being scanned"`
 	// description: |
 	//   ReadSize is the size of response to read at the end
 	//
@@ -65,6 +84,10 @@ type Request struct {
 	// description: |
 	//   SelfContained specifies if the request is self-contained.
 	SelfContained bool `yaml:"-" json:"-"`
+
+	// description: |
+	// ports is post processed list of ports to scan (obtained from Port)
+	ports []string `yaml:"-" json:"-"`
 
 	// Operators for the current request go here.
 	operators.Operators `yaml:",inline,omitempty"`
@@ -161,6 +184,23 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 		}
 	}
 
+	// parse ports and validate
+	if request.Port != "" {
+		for _, port := range strings.Split(request.Port, ",") {
+			if port == "" {
+				continue
+			}
+			portInt, err := strconv.Atoi(port)
+			if err != nil {
+				return errorutil.NewWithErr(err).Msgf("could not parse port %v from '%s'", port, request.Port)
+			}
+			if portInt < 1 || portInt > 65535 {
+				return errorutil.NewWithTag(request.TemplateID, "port %v is not in valid range", portInt)
+			}
+			request.ports = append(request.ports, port)
+		}
+	}
+
 	// Resolve payload paths from vars if they exists
 	for name, payload := range request.options.Options.Vars.AsMap() {
 		payloadStr, ok := payload.(string)
@@ -184,10 +224,12 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 	}
 
 	if len(request.Payloads) > 0 {
-		request.generator, err = generators.New(request.Payloads, request.AttackType.Value, request.options.TemplatePath, request.options.Options.AllowLocalFileAccess, request.options.Catalog, request.options.Options.AttackType)
+		request.generator, err = generators.New(request.Payloads, request.AttackType.Value, request.options.TemplatePath, request.options.Catalog, request.options.Options.AttackType, request.options.Options)
 		if err != nil {
 			return errors.Wrap(err, "could not parse payloads")
 		}
+		// if we have payloads, adjust threads if none specified
+		request.Threads = options.GetThreadsForNPayloadRequests(request.Requests(), request.Threads)
 	}
 
 	// Create a client for the class

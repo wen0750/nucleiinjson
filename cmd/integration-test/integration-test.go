@@ -23,6 +23,7 @@ var (
 	debug        = os.Getenv("DEBUG") == "true"
 	githubAction = os.Getenv("GH_ACTION") == "true"
 	customTests  = os.Getenv("TESTS")
+	protocol     = os.Getenv("PROTO")
 
 	success = aurora.Green("[✓]").String()
 	failed  = aurora.Red("[✘]").String()
@@ -38,15 +39,19 @@ var (
 		"headless":        headlessTestcases,
 		"whois":           whoisTestCases,
 		"ssl":             sslTestcases,
-		"code":            codeTestcases,
+		"library":         libraryTestcases,
 		"templatesPath":   templatesPathTestCases,
 		"templatesDir":    templatesDirTestCases,
 		"file":            fileTestcases,
 		"offlineHttp":     offlineHttpTestcases,
 		"customConfigDir": customConfigDirTestCases,
 		"fuzzing":         fuzzingTestCases,
+		"code":            codeTestCases,
+		"multi":           multiProtoTestcases,
 		"generic":         genericTestcases,
 		"dsl":             dslTestcases,
+		"flow":            flowTestcases,
+		"javascript":      jsTestcases,
 	}
 
 	// For debug purposes
@@ -127,6 +132,11 @@ func runTests(customTemplatePaths []string) []string {
 	var failedTestTemplatePaths []string
 
 	for proto, testCaseInfos := range protocolTests {
+		if protocol != "" {
+			if !strings.EqualFold(proto, protocol) {
+				continue
+			}
+		}
 		if len(customTemplatePaths) == 0 {
 			fmt.Printf("Running test cases for %q protocol\n", aurora.Blue(proto))
 		}
@@ -138,7 +148,7 @@ func runTests(customTemplatePaths []string) []string {
 			if len(customTemplatePaths) == 0 || sliceutil.Contains(customTemplatePaths, testCaseInfo.Path) {
 				var failedTemplatePath string
 				var err error
-				if proto == "interactsh" {
+				if proto == "interactsh" || strings.Contains(testCaseInfo.Path, "interactsh") {
 					failedTemplatePath, err = executeWithRetry(testCaseInfo.TestCase, testCaseInfo.Path, interactshRetryCount)
 				} else {
 					failedTemplatePath, err = execute(testCaseInfo.TestCase, testCaseInfo.Path)
@@ -164,9 +174,10 @@ func execute(testCase testutils.TestCase, templatePath string) (string, error) {
 }
 
 func expectResultsCount(results []string, expectedNumbers ...int) error {
+	results = filterHeadlessLogs(results)
 	match := sliceutil.Contains(expectedNumbers, len(results))
 	if !match {
-		return fmt.Errorf("incorrect number of results: %d (actual) vs %v (expected) \nResults:\n\t%s\n", len(results), expectedNumbers, strings.Join(results, "\n\t"))
+		return fmt.Errorf("incorrect number of results: %d (actual) vs %v (expected) \nResults:\n\t%s\n", len(results), expectedNumbers, strings.Join(results, "\n\t")) // nolint:all
 	}
 	return nil
 }
@@ -175,4 +186,18 @@ func normalizeSplit(str string) []string {
 	return strings.FieldsFunc(str, func(r rune) bool {
 		return r == ','
 	})
+}
+
+// if chromium is not installed go-rod installs it in .cache directory
+// this function filters out the logs from download and installation
+func filterHeadlessLogs(results []string) []string {
+	// [launcher.Browser] 2021/09/23 15:24:05 [launcher] [info] Starting browser
+	filtered := []string{}
+	for _, result := range results {
+		if strings.Contains(result, "[launcher.Browser]") {
+			continue
+		}
+		filtered = append(filtered, result)
+	}
+	return filtered
 }

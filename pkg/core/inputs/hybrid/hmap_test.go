@@ -13,9 +13,10 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/contextargs"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/protocolstate"
 	"github.com/wen0750/nucleiinjson/pkg/types"
+	"github.com/wen0750/nucleiinjson/pkg/utils/expand"
 )
 
-func Test_expandCIDRInputValue(t *testing.T) {
+func Test_expandCIDR(t *testing.T) {
 	tests := []struct {
 		cidr     string
 		expected []string
@@ -33,7 +34,8 @@ func Test_expandCIDRInputValue(t *testing.T) {
 		require.Nil(t, err, "could not create temporary input file")
 		input := &Input{hostMap: hm}
 
-		input.expandCIDRInputValue(tt.cidr)
+		ips := expand.CIDR(tt.cidr)
+		input.addTargets(ips)
 		// scan
 		got := []string{}
 		input.hostMap.Scan(func(k, _ []byte) error {
@@ -155,22 +157,22 @@ func Test_expandASNInputValue(t *testing.T) {
 		asn                string
 		expectedOutputFile string
 	}{
-		// {
-		// 	asn:                "AS14421",
-		// 	expectedOutputFile: "tests/AS14421.txt",
-		// },
-		// skipping since there is a issue with ASN lookup for AS134029
-		// {
-		// 	asn:                "AS134029",
-		// 	expectedOutputFile: "tests/AS134029.txt",
-		// },
+		{
+			asn:                "AS14421",
+			expectedOutputFile: "tests/AS14421.txt",
+		},
+		{
+			asn:                "AS134029",
+			expectedOutputFile: "tests/AS134029.txt",
+		},
 	}
 	for _, tt := range tests {
 		hm, err := hybrid.New(hybrid.DefaultDiskOptions)
 		require.Nil(t, err, "could not create temporary input file")
 		input := &Input{hostMap: hm}
 		// get the IP addresses for ASN number
-		input.expandASNInputValue(tt.asn)
+		ips := expand.ASN(tt.asn)
+		input.addTargets(ips)
 		// scan the hmap
 		got := []string{}
 		input.hostMap.Scan(func(k, v []byte) error {
@@ -181,6 +183,10 @@ func Test_expandASNInputValue(t *testing.T) {
 			got = append(got, metainput.Input)
 			return nil
 		})
+		if len(got) == 0 {
+			// asnmap server is down
+			t.SkipNow()
+		}
 		// read the expected IPs from the file
 		fileContent, err := os.ReadFile(tt.expectedOutputFile)
 		require.Nil(t, err, "could not read the expectedOutputFile file")

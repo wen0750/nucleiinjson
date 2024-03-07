@@ -94,6 +94,16 @@ type Matcher struct {
 	//       []string{"!contains(tolower(all_headers), ''strict-transport-security'')"}
 	DSL []string `yaml:"dsl,omitempty" json:"dsl,omitempty" jsonschema:"title=dsl expressions to match in response,description=DSL are the dsl expressions that will be evaluated as part of nuclei matching rules"`
 	// description: |
+	//   XPath are the xpath queries expressions that will be evaluated against the response part.
+	// examples:
+	//   - name: XPath Matcher to check a title
+	//     value: >
+	//       []string{"/html/head/title[contains(text(), 'How to Find XPath')]"}
+	//   - name: XPath Matcher for finding links with target="_blank"
+	//     value: >
+	//       []string{"//a[@target="_blank"]"}
+	XPath []string `yaml:"xpath,omitempty" json:"xpath,omitempty" jsonschema:"title=xpath queries to match in response,description=xpath are the XPath queries that will be evaluated against the response part of nuclei matching rules"`
+	// description: |
 	//   Encoding specifies the encoding for the words field if any.
 	// values:
 	//   - "hex"
@@ -110,6 +120,14 @@ type Matcher struct {
 	//   - false
 	//   - true
 	MatchAll bool `yaml:"match-all,omitempty" json:"match-all,omitempty" jsonschema:"title=match all values,description=match all matcher values ignoring condition"`
+	// description: |
+	//  Internal when true hides the matcher from output. Default is false.
+	// It is meant to be used in multiprotocol / flow templates to create internal matcher condition without printing it in output.
+	// or other similar use cases.
+	// values:
+	//   - false
+	//   - true
+	Internal bool `yaml:"internal,omitempty" json:"internal,omitempty" jsonschema:"title=hide matcher from output,description=hide matcher from output"`
 
 	// cached data for the compiled matcher
 	condition     ConditionType // todo: this field should be the one used for overridden marshal ops

@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/miekg/dns"
 	"github.com/pkg/errors"
+	"github.com/remeh/sizedwaitgroup"
+	"go.uber.org/multierr"
 	"golang.org/x/exp/maps"
 
 	"github.com/projectdiscovery/gologger"
@@ -53,12 +56,17 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, metadata,
 	// optionvars are vars passed from CLI or env variables
 	optionVars := generators.BuildPayloadFromOptions(request.options.Options)
 	// merge with metadata (eg. from workflow context)
-	vars = generators.MergeMaps(vars, metadata, optionVars)
+	if request.options.HasTemplateCtx(input.MetaInput) {
+		vars = generators.MergeMaps(vars, metadata, optionVars, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	}
 	variablesMap := request.options.Variables.Evaluate(vars)
 	vars = generators.MergeMaps(vars, variablesMap, request.options.Constants)
 
 	if request.generator != nil {
 		iterator := request.generator.NewIterator()
+		swg := sizedwaitgroup.New(request.Threads)
+		var multiErr error
+		m := &sync.Mutex{}
 
 		for {
 			value, ok := iterator.Value()
@@ -66,21 +74,31 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, metadata,
 				break
 			}
 			value = generators.MergeMaps(vars, value)
-			if err := request.execute(domain, metadata, previous, value, callback); err != nil {
-				return err
-			}
+			swg.Add()
+			go func(newVars map[string]interface{}) {
+				defer swg.Done()
+				if err := request.execute(input, domain, metadata, previous, newVars, callback); err != nil {
+					m.Lock()
+					multiErr = multierr.Append(multiErr, err)
+					m.Unlock()
+				}
+			}(value)
+		}
+		swg.Wait()
+		if multiErr != nil {
+			return multiErr
 		}
 	} else {
 		value := maps.Clone(vars)
-		return request.execute(domain, metadata, previous, value, callback)
+		return request.execute(input, domain, metadata, previous, value, callback)
 	}
 	return nil
 }
 
-func (request *Request) execute(domain string, metadata, previous output.InternalEvent, vars map[string]interface{}, callback protocols.OutputEventCallback) error {
+func (request *Request) execute(input *contextargs.Context, domain string, metadata, previous output.InternalEvent, vars map[string]interface{}, callback protocols.OutputEventCallback) error {
 
 	if vardump.EnableVarDump {
-		gologger.Debug().Msgf("Protocol request variables: \n%s\n", vardump.DumpVariables(vars))
+		gologger.Debug().Msgf("DNS Protocol request variables: \n%s\n", vardump.DumpVariables(vars))
 	}
 
 	// Compile each request for the template based on the URL
@@ -103,6 +121,7 @@ func (request *Request) execute(domain string, metadata, previous output.Interna
 		question = compiledRequest.Question[0].Name
 	}
 	// remove the last dot
+	domain = strings.TrimSuffix(domain, ".")
 	question = strings.TrimSuffix(question, ".")
 
 	requestString := compiledRequest.String()
@@ -149,11 +168,18 @@ func (request *Request) execute(domain string, metadata, previous output.Interna
 
 	// Create the output event
 	outputEvent := request.responseToDSLMap(compiledRequest, response, domain, question, traceData)
+	// expose response variables in proto_var format
+	// this is no-op if the template is not a multi protocol template
+	request.options.AddTemplateVars(input.MetaInput, request.Type(), request.ID, outputEvent)
 	for k, v := range previous {
 		outputEvent[k] = v
 	}
 	for k, v := range vars {
 		outputEvent[k] = v
+	}
+	// add variables from template context before matching/extraction
+	if request.options.HasTemplateCtx(input.MetaInput) {
+		outputEvent = generators.MergeMaps(outputEvent, request.options.GetTemplateCtx(input.MetaInput).GetAll())
 	}
 	event := eventcreator.CreateEvent(request, outputEvent, request.options.Options.Debug || request.options.Options.DebugResponse)
 

@@ -6,12 +6,14 @@ import (
 
 	"github.com/projectdiscovery/retryablehttp-go"
 	urlutil "github.com/projectdiscovery/utils/url"
+	"github.com/wen0750/nucleiinjson/pkg/types"
+	"github.com/wen0750/nucleiinjson/pkg/types/scanstrategy"
 )
 
 var (
 	// TODO: adapt regex for cases where port is updated
 	urlWithPortRegex = regexp.MustCompile(`^{{(BaseURL|RootURL)}}:(\d+)`)
-	// regex to detect traling slash in path (not applicable to raw requests)
+	// regex to detect trailing slash in path (not applicable to raw requests)
 	trailingSlashregex = regexp.MustCompile(`^\Q{{\E[a-zA-Z]+\Q}}/\E`)
 	// ErrNoMoreRequests is internal error to
 )
@@ -41,4 +43,10 @@ func SetHeader(req *retryablehttp.Request, name, value string) {
 	if name == "Host" {
 		req.Host = value
 	}
+}
+
+// ShouldDisableKeepAlive depending on scan strategy
+func ShouldDisableKeepAlive(options *types.Options) bool {
+	// with host-spray strategy keep-alive must be enabled
+	return options.ScanStrategy != scanstrategy.HostSpray.String()
 }

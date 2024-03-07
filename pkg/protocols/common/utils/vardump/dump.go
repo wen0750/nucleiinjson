@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	mapsutil "github.com/projectdiscovery/utils/maps"
 	"github.com/wen0750/nucleiinjson/pkg/types"
 )
 
@@ -21,7 +22,11 @@ func DumpVariables(data map[string]interface{}) string {
 	buffer.Grow(len(data) * 78) // grow buffer to an approximate size
 
 	builder := &strings.Builder{}
-	for k, v := range data {
+	// sort keys for deterministic output
+	keys := mapsutil.GetSortedKeys(data)
+
+	for _, k := range keys {
+		v := data[k]
 		valueString := types.ToString(v)
 
 		counter++

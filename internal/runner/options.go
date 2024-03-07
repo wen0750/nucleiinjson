@@ -24,7 +24,18 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/protocolinit"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/utils/vardump"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/headless/engine"
+	"github.com/wen0750/nucleiinjson/pkg/reporting"
+	"github.com/wen0750/nucleiinjson/pkg/reporting/exporters/jsonexporter"
+	"github.com/wen0750/nucleiinjson/pkg/reporting/exporters/jsonl"
+	"github.com/wen0750/nucleiinjson/pkg/reporting/exporters/markdown"
+	"github.com/wen0750/nucleiinjson/pkg/reporting/exporters/sarif"
 	"github.com/wen0750/nucleiinjson/pkg/types"
+	"github.com/wen0750/nucleiinjson/pkg/utils/yaml"
+)
+
+const (
+	// Default directory used to save protocols traffic
+	DefaultDumpTrafficOutputFolder = "output"
 )
 
 func ConfigureOptions() error {
@@ -49,6 +60,7 @@ func ParseOptions(options *types.Options) {
 
 	// Read the inputs and configure the logging
 	configureOutput(options)
+
 	// Show the user the banner
 	showBanner()
 
@@ -68,7 +80,7 @@ func ParseOptions(options *types.Options) {
 	}
 	// Validate the options passed by the user and if any
 	// invalid options have been used, exit.
-	if err := validateOptions(options); err != nil {
+	if err := ValidateOptions(options); err != nil {
 		gologger.Fatal().Msgf("Program exiting: %s\n", err)
 	}
 
@@ -80,9 +92,9 @@ func ParseOptions(options *types.Options) {
 		gologger.Fatal().Msgf("Could not initialize protocols: %s\n", err)
 	}
 
-	// Set Github token in env variable. runner.getGHClientWithToken() reads token from env
-	if options.GithubToken != "" && os.Getenv("GITHUB_TOKEN") != options.GithubToken {
-		os.Setenv("GITHUB_TOKEN", options.GithubToken)
+	// Set GitHub token in env variable. runner.getGHClientWithToken() reads token from env
+	if options.GitHubToken != "" && os.Getenv("GITHUB_TOKEN") != options.GitHubToken {
+		os.Setenv("GITHUB_TOKEN", options.GitHubToken)
 	}
 
 	if options.UncoverQuery != nil {
@@ -98,7 +110,7 @@ func ParseOptions(options *types.Options) {
 }
 
 // validateOptions validates the configuration options passed
-func validateOptions(options *types.Options) error {
+func ValidateOptions(options *types.Options) error {
 	validate := validator.New()
 	if err := validate.Struct(options); err != nil {
 		if _, ok := err.(*validator.InvalidValidationError); ok {
@@ -182,37 +194,6 @@ func validateOptions(options *types.Options) error {
 	if !useIPV4 && !useIPV6 {
 		return errors.New("ipv4 and/or ipv6 must be selected")
 	}
-
-	// Validate cloud option
-	if err := validateCloudOptions(options); err != nil {
-		return err
-	}
-	return nil
-}
-
-func validateCloudOptions(options *types.Options) error {
-	if options.HasCloudOptions() && !options.Cloud {
-		return errors.New("cloud flags cannot be used without cloud option")
-	}
-	if options.Cloud {
-		if options.CloudAPIKey == "" {
-			return errors.New("missing NUCLEI_CLOUD_API env variable")
-		}
-		var missing []string
-		switch options.AddDatasource {
-		case "s3":
-			missing = validateMissingS3Options(options)
-		case "github":
-			missing = validateMissingGithubOptions(options)
-		case "gitlab":
-			missing = validateMissingGitLabOptions(options)
-		case "azure":
-			missing = validateMissingAzureOptions(options)
-		}
-		if len(missing) > 0 {
-			return fmt.Errorf("missing %v env variables", strings.Join(missing, ", "))
-		}
-	}
 	return nil
 }
 
@@ -253,17 +234,6 @@ func validateMissingAzureOptions(options *types.Options) []string {
 	return missing
 }
 
-func validateMissingGithubOptions(options *types.Options) []string {
-	var missing []string
-	if options.GithubToken == "" {
-		missing = append(missing, "GITHUB_TOKEN")
-	}
-	if len(options.GithubTemplateRepo) == 0 {
-		missing = append(missing, "GITHUB_TEMPLATE_REPO")
-	}
-	return missing
-}
-
 func validateMissingGitLabOptions(options *types.Options) []string {
 	var missing []string
 	if options.GitLabToken == "" {
@@ -274,6 +244,47 @@ func validateMissingGitLabOptions(options *types.Options) []string {
 	}
 
 	return missing
+}
+
+func createReportingOptions(options *types.Options) (*reporting.Options, error) {
+	var reportingOptions = &reporting.Options{}
+	if options.ReportingConfig != "" {
+		file, err := os.Open(options.ReportingConfig)
+		if err != nil {
+			return nil, errors.Wrap(err, "could not open reporting config file")
+		}
+		defer file.Close()
+
+		if err := yaml.DecodeAndValidate(file, reportingOptions); err != nil {
+			return nil, errors.Wrap(err, "could not parse reporting config file")
+		}
+		Walk(reportingOptions, expandEndVars)
+	}
+	if options.MarkdownExportDirectory != "" {
+		reportingOptions.MarkdownExporter = &markdown.Options{
+			Directory: options.MarkdownExportDirectory,
+			OmitRaw:   options.OmitRawRequests,
+			SortMode:  options.MarkdownExportSortMode,
+		}
+	}
+	if options.SarifExport != "" {
+		reportingOptions.SarifExporter = &sarif.Options{File: options.SarifExport}
+	}
+	if options.JSONExport != "" {
+		reportingOptions.JSONExporter = &jsonexporter.Options{
+			File:    options.JSONExport,
+			OmitRaw: options.OmitRawRequests,
+		}
+	}
+	if options.JSONLExport != "" {
+		reportingOptions.JSONLExporter = &jsonl.Options{
+			File:    options.JSONLExport,
+			OmitRaw: options.OmitRawRequests,
+		}
+	}
+
+	reportingOptions.OmitRaw = options.OmitRawRequests
+	return reportingOptions, nil
 }
 
 // configureOutput configures the output logging levels to be displayed on the screen
@@ -352,18 +363,10 @@ func validateCertificatePaths(certificatePaths ...string) {
 
 // Read the input from env and set options
 func readEnvInputVars(options *types.Options) {
-	if strings.EqualFold(os.Getenv("NUCLEI_CLOUD"), "true") {
-		options.Cloud = true
-	}
-	if options.CloudURL = os.Getenv("NUCLEI_CLOUD_SERVER"); options.CloudURL == "" {
-		options.CloudURL = "https://cloud-dev.nuclei.sh"
-	}
-	options.CloudAPIKey = os.Getenv("NUCLEI_CLOUD_API")
-
-	options.GithubToken = os.Getenv("GITHUB_TOKEN")
+	options.GitHubToken = os.Getenv("GITHUB_TOKEN")
 	repolist := os.Getenv("GITHUB_TEMPLATE_REPO")
 	if repolist != "" {
-		options.GithubTemplateRepo = append(options.GithubTemplateRepo, stringsutil.SplitAny(repolist, ",")...)
+		options.GitHubTemplateRepo = append(options.GitHubTemplateRepo, stringsutil.SplitAny(repolist, ",")...)
 	}
 
 	// GitLab options for downloading templates from a repository
@@ -400,6 +403,10 @@ func readEnvInputVars(options *types.Options) {
 	options.AzureClientID = os.Getenv("AZURE_CLIENT_ID")
 	options.AzureClientSecret = os.Getenv("AZURE_CLIENT_SECRET")
 	options.AzureServiceURL = os.Getenv("AZURE_SERVICE_URL")
+
+	// Custom public keys for template verification
+	options.CodeTemplateSignaturePublicKey = os.Getenv("NUCLEI_SIGNATURE_PUBLIC_KEY")
+	options.CodeTemplateSignatureAlgorithm = os.Getenv("NUCLEI_SIGNATURE_ALGORITHM")
 
 	// General options to disable the template download locations from being used.
 	// This will override the default behavior of downloading templates from the default locations as well as the

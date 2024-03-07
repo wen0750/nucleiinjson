@@ -9,6 +9,8 @@ import (
 
 	"github.com/julienschmidt/httprouter"
 
+	errorutil "github.com/projectdiscovery/utils/errors"
+	permissionutil "github.com/projectdiscovery/utils/permission"
 	"github.com/wen0750/nucleiinjson/pkg/testutils"
 )
 
@@ -19,6 +21,7 @@ var loaderTestcases = []TestCaseInfo{
 	{Path: "loader/nonexistent-template-list.yaml", TestCase: &nonExistentTemplateList{}},
 	{Path: "loader/nonexistent-workflow-list.yaml", TestCase: &nonExistentWorkflowList{}},
 	{Path: "loader/template-list-not-allowed.yaml", TestCase: &remoteTemplateListNotAllowed{}},
+	{Path: "loader/load-template-with-id", TestCase: &loadTemplateWithID{}},
 }
 
 type remoteTemplateList struct{}
@@ -48,13 +51,13 @@ func (h *remoteTemplateList) Execute(templateList string) error {
 	defer ts.Close()
 
 	configFileData := `remote-template-domain: [ "` + ts.Listener.Addr().String() + `" ]`
-	err := os.WriteFile("test-config.yaml", []byte(configFileData), os.ModePerm)
+	err := os.WriteFile("test-config.yaml", []byte(configFileData), permissionutil.ConfigFilePermission)
 	if err != nil {
 		return err
 	}
 	defer os.Remove("test-config.yaml")
 
-	results, err := testutils.RunNucleiBareArgsAndGetResults(debug, "-target", ts.URL, "-tu", ts.URL+"/template_list", "-config", "test-config.yaml")
+	results, err := testutils.RunNucleiBareArgsAndGetResults(debug, nil, "-target", ts.URL, "-template-url", ts.URL+"/template_list", "-config", "test-config.yaml")
 	if err != nil {
 		return err
 	}
@@ -77,7 +80,7 @@ func (h *excludedTemplate) Execute(templateList string) error {
 	ts := httptest.NewServer(router)
 	defer ts.Close()
 
-	results, err := testutils.RunNucleiBareArgsAndGetResults(debug, "-target", ts.URL, "-t", templateList, "-include-templates", templateList)
+	results, err := testutils.RunNucleiBareArgsAndGetResults(debug, nil, "-target", ts.URL, "-t", templateList, "-include-templates", templateList)
 	if err != nil {
 		return err
 	}
@@ -111,7 +114,7 @@ func (h *remoteTemplateListNotAllowed) Execute(templateList string) error {
 	ts := httptest.NewServer(router)
 	defer ts.Close()
 
-	_, err := testutils.RunNucleiBareArgsAndGetResults(debug, "-target", ts.URL, "-tu", ts.URL+"/template_list")
+	_, err := testutils.RunNucleiBareArgsAndGetResults(debug, nil, "-target", ts.URL, "-template-url", ts.URL+"/template_list")
 	if err == nil {
 		return fmt.Errorf("expected error for not allowed remote template list url")
 	}
@@ -147,13 +150,13 @@ func (h *remoteWorkflowList) Execute(workflowList string) error {
 	defer ts.Close()
 
 	configFileData := `remote-template-domain: [ "` + ts.Listener.Addr().String() + `" ]`
-	err := os.WriteFile("test-config.yaml", []byte(configFileData), os.ModePerm)
+	err := os.WriteFile("test-config.yaml", []byte(configFileData), permissionutil.ConfigFilePermission)
 	if err != nil {
 		return err
 	}
 	defer os.Remove("test-config.yaml")
 
-	results, err := testutils.RunNucleiBareArgsAndGetResults(debug, "-target", ts.URL, "-wu", ts.URL+"/workflow_list", "-config", "test-config.yaml")
+	results, err := testutils.RunNucleiBareArgsAndGetResults(debug, nil, "-target", ts.URL, "-workflow-url", ts.URL+"/workflow_list", "-config", "test-config.yaml")
 	if err != nil {
 		return err
 	}
@@ -169,7 +172,7 @@ func (h *nonExistentTemplateList) Execute(nonExistingTemplateList string) error 
 	ts := httptest.NewServer(router)
 	defer ts.Close()
 
-	_, err := testutils.RunNucleiBareArgsAndGetResults(debug, "-target", ts.URL, "-tu", ts.URL+"/404")
+	_, err := testutils.RunNucleiBareArgsAndGetResults(debug, nil, "-target", ts.URL, "-template-url", ts.URL+"/404")
 	if err == nil {
 		return fmt.Errorf("expected error for nonexisting workflow url")
 	}
@@ -185,10 +188,20 @@ func (h *nonExistentWorkflowList) Execute(nonExistingWorkflowList string) error 
 	ts := httptest.NewServer(router)
 	defer ts.Close()
 
-	_, err := testutils.RunNucleiBareArgsAndGetResults(debug, "-target", ts.URL, "-wu", ts.URL+"/404")
+	_, err := testutils.RunNucleiBareArgsAndGetResults(debug, nil, "-target", ts.URL, "-workflow-url", ts.URL+"/404")
 	if err == nil {
 		return fmt.Errorf("expected error for nonexisting workflow url")
 	}
 
 	return nil
+}
+
+type loadTemplateWithID struct{}
+
+func (h *loadTemplateWithID) Execute(nooop string) error {
+	results, err := testutils.RunNucleiBareArgsAndGetResults(debug, nil, "-target", "scanme.sh", "-id", "self-signed-ssl")
+	if err != nil {
+		return errorutil.NewWithErr(err).Msgf("failed to load template with id")
+	}
+	return expectResultsCount(results, 1)
 }

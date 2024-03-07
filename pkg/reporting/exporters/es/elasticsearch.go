@@ -10,11 +10,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/corpix/uarand"
-
 	"github.com/pkg/errors"
 
 	"github.com/projectdiscovery/retryablehttp-go"
+	"github.com/projectdiscovery/useragent"
 	"github.com/wen0750/nucleiinjson/pkg/output"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/protocolstate"
 )
@@ -114,7 +113,8 @@ func (exporter *Exporter) Export(event *output.ResultEvent) error {
 	if len(exporter.authentication) > 0 {
 		req.Header.Add("Authorization", exporter.authentication)
 	}
-	req.Header.Set("User-Agent", uarand.GetRandom())
+	userAgent := useragent.PickRandom()
+	req.Header.Set("User-Agent", userAgent.Raw)
 	req.Header.Add("Content-Type", "application/json")
 
 	d := data{

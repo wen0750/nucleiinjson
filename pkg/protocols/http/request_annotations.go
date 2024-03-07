@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"regexp"
 	"strings"
@@ -19,9 +20,9 @@ var (
 	// @tls-sni:target overrides the input target with the annotated one
 	// special values:
 	// request.host: takes the value from the host header
-	// target: overiddes with the specific value
+	// target: overrides with the specific value
 	reSniAnnotation = regexp.MustCompile(`(?m)^@tls-sni:\s*(.+)\s*$`)
-	// @timeout:duration overrides the input timout with a custom duration
+	// @timeout:duration overrides the input timeout with a custom duration
 	reTimeoutAnnotation = regexp.MustCompile(`(?m)^@timeout:\s*(.+)\s*$`)
 	// @once sets the request to be executed only once for a specific URL
 	reOnceAnnotation = regexp.MustCompile(`(?m)^@once\s*$`)
@@ -36,15 +37,15 @@ const (
 // parseFlowAnnotations and override requests flow
 func parseFlowAnnotations(rawRequest string) (flowMark, bool) {
 	var fm flowMark
-	// parse request for known ovverride annotations
-	var hasFlowOveride bool
+	// parse request for known override annotations
+	var hasFlowOverride bool
 	// @once
 	if reOnceAnnotation.MatchString(rawRequest) {
 		fm = Once
-		hasFlowOveride = true
+		hasFlowOverride = true
 	}
 
-	return fm, hasFlowOveride
+	return fm, hasFlowOverride
 }
 
 type annotationOverrides struct {
@@ -55,7 +56,7 @@ type annotationOverrides struct {
 
 // parseAnnotations and override requests settings
 func (r *Request) parseAnnotations(rawRequest string, request *retryablehttp.Request) (overrides annotationOverrides, modified bool) {
-	// parse request for known ovverride annotations
+	// parse request for known override annotations
 
 	// @Host:target
 	if hosts := reHostAnnotation.FindStringSubmatch(rawRequest); len(hosts) > 0 {
@@ -87,10 +88,8 @@ func (r *Request) parseAnnotations(rawRequest string, request *retryablehttp.Req
 	if hosts := reSniAnnotation.FindStringSubmatch(rawRequest); len(hosts) > 0 {
 		value := strings.TrimSpace(hosts[1])
 		value = stringsutil.TrimPrefixAny(value, "http://", "https://")
-		if idxForwardSlash := strings.Index(value, "/"); idxForwardSlash >= 0 {
-			value = value[:idxForwardSlash]
-		}
 
+		var literal bool
 		switch value {
 		case "request.host":
 			value = request.Host
@@ -99,9 +98,15 @@ func (r *Request) parseAnnotations(rawRequest string, request *retryablehttp.Req
 				value = interactshURL
 			}
 			overrides.interactshURLs = append(overrides.interactshURLs, value)
+		default:
+			literal = true
 		}
 		ctx := context.WithValue(request.Context(), fastdialer.SniName, value)
 		request = request.Clone(ctx)
+
+		if literal {
+			request.TLS = &tls.ConnectionState{ServerName: value}
+		}
 		modified = true
 	}
 

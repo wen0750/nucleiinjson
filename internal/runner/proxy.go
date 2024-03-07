@@ -14,7 +14,7 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/types"
 )
 
-// loadProxyServers load list of proxy servers from file or comma seperated
+// loadProxyServers load list of proxy servers from file or comma separated
 func loadProxyServers(options *types.Options) error {
 	if len(options.Proxy) == 0 {
 		return nil

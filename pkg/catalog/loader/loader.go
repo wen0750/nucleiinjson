@@ -1,12 +1,22 @@
 package loader
 
 import (
+	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"sort"
+	"strings"
 
+	"github.com/logrusorgru/aurora"
 	"github.com/pkg/errors"
 	"github.com/projectdiscovery/gologger"
+	"github.com/projectdiscovery/retryablehttp-go"
+	errorutil "github.com/projectdiscovery/utils/errors"
+	stringsutil "github.com/projectdiscovery/utils/strings"
+	urlutil "github.com/projectdiscovery/utils/url"
 	"github.com/wen0750/nucleiinjson/pkg/catalog"
+	"github.com/wen0750/nucleiinjson/pkg/catalog/config"
 	cfg "github.com/wen0750/nucleiinjson/pkg/catalog/config"
 	"github.com/wen0750/nucleiinjson/pkg/catalog/loader/filter"
 	"github.com/wen0750/nucleiinjson/pkg/model/types/severity"
@@ -17,6 +27,15 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/types"
 	"github.com/wen0750/nucleiinjson/pkg/utils/stats"
 	"github.com/wen0750/nucleiinjson/pkg/workflows"
+)
+
+const (
+	httpPrefix  = "http://"
+	httpsPrefix = "https://"
+)
+
+var (
+	TrustedTemplateDomains = []string{"cloud.projectdiscovery.io"}
 )
 
 // Config contains the configuration options for the loader
@@ -59,7 +78,7 @@ type Store struct {
 	preprocessor templates.Preprocessor
 
 	// NotFoundCallback is called for each not found template
-	// This overrides error handling for not found templatesss
+	// This overrides error handling for not found templates
 	NotFoundCallback func(template string) bool
 }
 
@@ -87,6 +106,7 @@ func NewConfig(options *types.Options, catalog catalog.Catalog, executerOpts pro
 		Catalog:                  catalog,
 		ExecutorOptions:          executerOpts,
 	}
+	loaderConfig.RemoteTemplateDomainList = append(loaderConfig.RemoteTemplateDomainList, TrustedTemplateDomains...)
 	return &loaderConfig
 }
 
@@ -108,6 +128,7 @@ func New(config *Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	// Create a tag filter based on provided configuration
 	store := &Store{
 		config:    config,
@@ -119,6 +140,31 @@ func New(config *Config) (*Store, error) {
 		finalTemplates: config.Templates,
 		finalWorkflows: config.Workflows,
 	}
+
+	// Do a check to see if we have URLs in templates flag, if so
+	// we need to processs them separately and remove them from the initial list
+	var templatesFinal []string
+	for _, template := range config.Templates {
+		// TODO: Add and replace this with urlutil.IsURL() helper
+		if stringsutil.HasPrefixAny(template, httpPrefix, httpsPrefix) {
+			config.TemplateURLs = append(config.TemplateURLs, template)
+		} else {
+			templatesFinal = append(templatesFinal, template)
+		}
+	}
+
+	// fix editor paths
+	remoteTemplates := []string{}
+	for _, v := range config.TemplateURLs {
+		if _, err := urlutil.Parse(v); err == nil {
+			remoteTemplates = append(remoteTemplates, handleTemplatesEditorURLs(v))
+		} else {
+
+			templatesFinal = append(templatesFinal, v) // something went wrong, treat it as a file
+		}
+	}
+	config.TemplateURLs = remoteTemplates
+	store.finalTemplates = templatesFinal
 
 	urlBasedTemplatesProvided := len(config.TemplateURLs) > 0 || len(config.WorkflowURLs) > 0
 	if urlBasedTemplatesProvided {
@@ -142,7 +188,45 @@ func New(config *Config) (*Store, error) {
 	if len(store.finalTemplates) == 0 && len(store.finalWorkflows) == 0 && !urlBasedTemplatesProvided {
 		store.finalTemplates = []string{cfg.DefaultConfig.TemplatesDirectory}
 	}
+
 	return store, nil
+}
+
+func handleTemplatesEditorURLs(input string) string {
+	parsed, err := url.Parse(input)
+	if err != nil {
+		return input
+	}
+	if !strings.HasSuffix(parsed.Hostname(), "cloud.projectdiscovery.io") {
+		return input
+	}
+	if strings.HasSuffix(parsed.Path, ".yaml") {
+		return input
+	}
+	parsed.Path = fmt.Sprintf("%s.yaml", parsed.Path)
+	finalURL := parsed.String()
+	return finalURL
+}
+
+// ReadTemplateFromURI should only be used for viewing templates
+// and should not be used anywhere else like loading and executing templates
+// there is no sandbox restriction here
+func (store *Store) ReadTemplateFromURI(uri string, remote bool) ([]byte, error) {
+	if stringsutil.HasPrefixAny(uri, httpPrefix, httpsPrefix) && remote {
+		uri = handleTemplatesEditorURLs(uri)
+		remoteTemplates, _, err := getRemoteTemplatesAndWorkflows([]string{uri}, nil, store.config.RemoteTemplateDomainList)
+		if err != nil || len(remoteTemplates) == 0 {
+			return nil, errorutil.NewWithErr(err).Msgf("Could not load template %s: got %v", uri, remoteTemplates)
+		}
+		resp, err := retryablehttp.Get(remoteTemplates[0])
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		return io.ReadAll(resp.Body)
+	} else {
+		return os.ReadFile(uri)
+	}
 }
 
 // Templates returns all the templates in the store
@@ -187,7 +271,7 @@ func (store *Store) ValidateTemplates() error {
 	if areTemplatesValid(store, filteredTemplatePaths) && areWorkflowsValid(store, filteredWorkflowPaths) {
 		return nil
 	}
-	return errors.New("errors occured during template validation")
+	return errors.New("errors occurred during template validation")
 }
 
 func areWorkflowsValid(store *Store, filteredWorkflowPaths map[string]struct{}) bool {
@@ -314,13 +398,36 @@ func (store *Store) LoadTemplatesWithTags(templatesList, tags []string) []*templ
 				gologger.Warning().Msgf("Could not parse template %s: %s\n", templatePath, err)
 			} else if parsed != nil {
 				if len(parsed.RequestsHeadless) > 0 && !store.config.ExecutorOptions.Options.Headless {
-					gologger.Warning().Msgf("Headless flag is required for headless template %s\n", templatePath)
+					// donot include headless template in final list if headless flag is not set
+					stats.Increment(parsers.HeadlessFlagWarningStats)
+					if config.DefaultConfig.LogAllEvents {
+						gologger.Print().Msgf("[%v] Headless flag is required for headless template '%s'.\n", aurora.Yellow("WRN").String(), templatePath)
+					}
+				} else if len(parsed.RequestsCode) > 0 && !store.config.ExecutorOptions.Options.EnableCodeTemplates {
+					// donot include 'Code' protocol custom template in final list if code flag is not set
+					stats.Increment(parsers.CodeFlagWarningStats)
+					if config.DefaultConfig.LogAllEvents {
+						gologger.Print().Msgf("[%v] Code flag is required for code protocol template '%s'.\n", aurora.Yellow("WRN").String(), templatePath)
+					}
+				} else if len(parsed.RequestsCode) > 0 && !parsed.Verified && len(parsed.Workflows) == 0 {
+					// donot include unverified 'Code' protocol custom template in final list
+					stats.Increment(parsers.UnsignedWarning)
+					if config.DefaultConfig.LogAllEvents {
+						gologger.Print().Msgf("[%v] Tampered/Unsigned template at %v.\n", aurora.Yellow("WRN").String(), templatePath)
+					}
 				} else {
 					loadedTemplates = append(loadedTemplates, parsed)
 				}
 			}
 		}
 		if err != nil {
+			if strings.Contains(err.Error(), filter.ErrExcluded.Error()) {
+				stats.Increment(parsers.TemplatesExecutedStats)
+				if config.DefaultConfig.LogAllEvents {
+					gologger.Print().Msgf("[%v] %v\n", aurora.Yellow("WRN").String(), err.Error())
+				}
+				continue
+			}
 			gologger.Warning().Msg(err.Error())
 		}
 	}

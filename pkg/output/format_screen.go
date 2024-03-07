@@ -3,7 +3,9 @@ package output
 import (
 	"bytes"
 	"strconv"
+	"strings"
 
+	mapsutil "github.com/projectdiscovery/utils/maps"
 	"github.com/wen0750/nucleiinjson/pkg/types"
 )
 
@@ -56,6 +58,9 @@ func (w *StandardWriter) formatScreen(output *ResultEvent) []byte {
 		builder.WriteString(" [")
 
 		for i, item := range output.ExtractedResults {
+			// trim trailing space
+			item = strings.TrimSpace(item)
+			item = strconv.QuoteToASCII(item)
 			builder.WriteString(w.aurora.BrightCyan(item).String())
 
 			if i != len(output.ExtractedResults)-1 {
@@ -83,7 +88,9 @@ func (w *StandardWriter) formatScreen(output *ResultEvent) []byte {
 		builder.WriteString(" [")
 
 		first := true
-		for name, value := range output.Metadata {
+		// sort to get predictable output
+		for _, name := range mapsutil.GetSortedKeys(output.Metadata) {
+			value := output.Metadata[name]
 			if !first {
 				builder.WriteRune(',')
 			}

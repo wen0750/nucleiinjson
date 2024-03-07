@@ -2,10 +2,14 @@ package fuzz
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strings"
 
-	"github.com/corpix/uarand"
+	"github.com/pkg/errors"
+	"github.com/projectdiscovery/gologger"
+	"github.com/projectdiscovery/useragent"
+
 	"github.com/projectdiscovery/retryablehttp-go"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	urlutil "github.com/projectdiscovery/utils/url"
@@ -19,6 +23,46 @@ func (rule *Rule) executePartRule(input *ExecuteRuleInput, payload string) error
 	switch rule.partType {
 	case queryPartType:
 		return rule.executeQueryPartRule(input, payload)
+	case headersPartType:
+		return rule.executeHeadersPartRule(input, payload)
+	}
+	return nil
+}
+
+// executeHeadersPartRule executes headers part rules
+func (rule *Rule) executeHeadersPartRule(input *ExecuteRuleInput, payload string) error {
+	// clone the request to avoid modifying the original
+	originalRequest := input.BaseRequest
+	req := originalRequest.Clone(context.TODO())
+	// Also clone headers
+	headers := req.Header.Clone()
+
+	for key, values := range originalRequest.Header {
+		cloned := sliceutil.Clone(values)
+		for i, value := range values {
+			if !rule.matchKeyOrValue(key, value) {
+				continue
+			}
+			var evaluated string
+			evaluated, input.InteractURLs = rule.executeEvaluate(input, key, value, payload, input.InteractURLs)
+			cloned[i] = evaluated
+
+			if rule.modeType == singleModeType {
+				headers[key] = cloned
+				if err := rule.buildHeadersInput(input, headers, input.InteractURLs); err != nil && err != io.EOF {
+					gologger.Error().Msgf("Could not build request for headers part rule %v: %s\n", rule, err)
+					return err
+				}
+				cloned[i] = value // change back to previous value for headers
+			}
+		}
+		headers[key] = cloned
+	}
+
+	if rule.modeType == multipleModeType {
+		if err := rule.buildHeadersInput(input, headers, input.InteractURLs); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -67,6 +111,29 @@ func (rule *Rule) executeQueryPartRule(input *ExecuteRuleInput, payload string) 
 	return err
 }
 
+// buildHeadersInput returns created request for a Headers Input
+func (rule *Rule) buildHeadersInput(input *ExecuteRuleInput, headers http.Header, interactURLs []string) error {
+	var req *retryablehttp.Request
+	if input.BaseRequest == nil {
+		return errors.New("Base request cannot be nil when fuzzing headers")
+	} else {
+		req = input.BaseRequest.Clone(context.TODO())
+		req.Header = headers
+		// update host of request and not URL
+		// URL.Host is used to dial the connection
+		req.Request.Host = req.Header.Get("Host")
+	}
+	request := GeneratedRequest{
+		Request:       req,
+		InteractURLs:  interactURLs,
+		DynamicValues: input.Values,
+	}
+	if !input.Callback(request) {
+		return io.EOF
+	}
+	return nil
+}
+
 // buildQueryInput returns created request for a Query Input
 func (rule *Rule) buildQueryInput(input *ExecuteRuleInput, parsed *urlutil.URL, interactURLs []string) error {
 	var req *retryablehttp.Request
@@ -76,7 +143,8 @@ func (rule *Rule) buildQueryInput(input *ExecuteRuleInput, parsed *urlutil.URL, 
 		if err != nil {
 			return err
 		}
-		req.Header.Set("User-Agent", uarand.GetRandom())
+		userAgent := useragent.PickRandom()
+		req.Header.Set("User-Agent", userAgent.Raw)
 	} else {
 		req = input.BaseRequest.Clone(context.TODO())
 		req.SetURL(parsed)

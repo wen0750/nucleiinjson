@@ -17,6 +17,7 @@ import (
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/fuzz"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/common/generators"
 	"github.com/wen0750/nucleiinjson/pkg/protocols/http/httpclientpool"
+	httputil "github.com/wen0750/nucleiinjson/pkg/protocols/utils/http"
 )
 
 // Request contains a http request to be made from a template
@@ -145,7 +146,13 @@ type Request struct {
 	// description: |
 	//   CookieReuse is an optional setting that enables cookie reuse for
 	//   all requests defined in raw section.
+	// Deprecated: This is default now. Use disable-cookie to disable cookie reuse. cookie-reuse will be removed in future releases.
 	CookieReuse bool `yaml:"cookie-reuse,omitempty" json:"cookie-reuse,omitempty" jsonschema:"title=optional cookie reuse enable,description=Optional setting that enables cookie reuse"`
+
+	// description: |
+	//   DisableCookie is an optional setting that disables cookie reuse
+	DisableCookie bool `yaml:"disable-cookie,omitempty" json:"disable-cookie,omitempty" jsonschema:"title=optional disable cookie reuse,description=Optional setting that disables cookie reuse"`
+
 	// description: |
 	//   Enables force reading of the entire raw unsafe request body ignoring
 	//   any specified content length headers.
@@ -190,6 +197,7 @@ type Request struct {
 	SkipVariablesCheck bool `yaml:"skip-variables-check,omitempty" json:"skip-variables-check,omitempty" jsonschema:"title=skip variable checks,description=Skips the check for unresolved variables in request"`
 	// description: |
 	//   IterateAll iterates all the values extracted from internal extractors
+	// Deprecated: Use flow instead . iterate-all will be removed in future releases
 	IterateAll bool `yaml:"iterate-all,omitempty" json:"iterate-all,omitempty" jsonschema:"title=iterate all the values,description=Iterates all the values extracted from internal extractors"`
 	// description: |
 	//   DigestAuthUsername specifies the username for digest authentication
@@ -245,11 +253,13 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 	}
 
 	connectionConfiguration := &httpclientpool.Configuration{
-		Threads:      request.Threads,
-		MaxRedirects: request.MaxRedirects,
-		NoTimeout:    false,
-		CookieReuse:  request.CookieReuse,
-		Connection:   &httpclientpool.ConnectionConfiguration{DisableKeepAlive: true},
+		Threads:       request.Threads,
+		MaxRedirects:  request.MaxRedirects,
+		NoTimeout:     false,
+		DisableCookie: request.DisableCookie,
+		Connection: &httpclientpool.ConnectionConfiguration{
+			DisableKeepAlive: httputil.ShouldDisableKeepAlive(options.Options),
+		},
 		RedirectFlow: httpclientpool.DontFollowRedirect,
 	}
 
@@ -353,7 +363,7 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 	}
 
 	if len(request.Payloads) > 0 {
-		request.generator, err = generators.New(request.Payloads, request.AttackType.Value, request.options.TemplatePath, request.options.Options.AllowLocalFileAccess, request.options.Catalog, request.options.Options.AttackType)
+		request.generator, err = generators.New(request.Payloads, request.AttackType.Value, request.options.TemplatePath, request.options.Catalog, request.options.Options.AttackType, request.options.Options)
 		if err != nil {
 			return errors.Wrap(err, "could not parse payloads")
 		}
@@ -377,6 +387,11 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 			}
 		}
 	}
+	if len(request.Payloads) > 0 {
+		// if we have payloads, adjust threads if none specified
+		request.Threads = options.GetThreadsForNPayloadRequests(request.Requests(), request.Threads)
+	}
+
 	return nil
 }
 

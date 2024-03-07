@@ -35,13 +35,8 @@ func (c *CustomTemplatesManager) Update(ctx context.Context) {
 func NewCustomTemplatesManager(options *types.Options) (*CustomTemplatesManager, error) {
 	ctm := &CustomTemplatesManager{providers: []Provider{}}
 
-	if options.Cloud {
-		// if cloud is enabled, custom templates are Nop
-		return ctm, nil
-	}
-
 	// Add GitHub providers
-	githubProviders, err := NewGithubProviders(options)
+	githubProviders, err := NewGitHubProviders(options)
 	if err != nil {
 		return nil, errorutil.NewWithErr(err).Msgf("could not create github providers for custom templates")
 	}
@@ -68,7 +63,7 @@ func NewCustomTemplatesManager(options *types.Options) (*CustomTemplatesManager,
 	}
 
 	// Add GitLab providers
-	gitlabProviders, err := NewGitlabProviders(options)
+	gitlabProviders, err := NewGitLabProviders(options)
 	if err != nil {
 		return nil, errorutil.NewWithErr(err).Msgf("could not create gitlab providers for custom templates")
 	}
